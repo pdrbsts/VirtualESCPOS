@@ -1,9 +1,10 @@
 *.obj
-*.exe
+# *.exe - Allow specifically:
+!bin/VirtualESCPOS.exe
 *.pdb
 *.ilk
 *.log
-bin/
+# bin/ - Removing global ignore to allow contents
 .vs/
 *.sln
 *.vcxproj
