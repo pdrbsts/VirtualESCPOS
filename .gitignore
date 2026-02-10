@@ -12,3 +12,4 @@ bin/
 capture.png
 debug_state.log
 build/
+test_gs_star.py
