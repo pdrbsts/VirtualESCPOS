@@ -1,6 +1,6 @@
 #include "VirtualPrinter.h"
 #include <iostream>
-#include <fstream>
+
 #include <string>
 
 // Helper for Code Page mapping (Minimal implementation)
@@ -136,12 +136,12 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
     {
         std::lock_guard<std::mutex> lock(mutex);
 
-        std::ofstream debugFile("debug_state.log", std::ios::app);
+
 
         for (int i = 0; i < length; ++i) {
             unsigned char b = data[i];
 
-            if (debugFile.is_open()) debugFile << "State: " << state << " Byte: " << std::hex << (int)b << std::endl;
+
             
             switch (state) {
             case STATE_NORMAL:

@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "resource.h"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -18,7 +19,6 @@ std::vector<PrinterElement> currentElements;
 float currentY = 10.0f;
 float scale = 1.0f; // Zoom factor, maybe?
 
-// Function to handle repaint
 // Function to handle repaint
 void UpdatePrinter(void* param) {
     // Post message to UI thread to trigger repaint safely
@@ -384,6 +384,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     WNDCLASS wc = { };
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
@@ -391,7 +392,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     RegisterClass(&wc);
 
     hMainWindow = CreateWindowEx(
-        0, CLASS_NAME, L"Virtual ESC/POS Printer (Port 9100)",
+        0, CLASS_NAME, L"Impressora ESC/POS Virtual (Porto 9100)",
         WS_OVERLAPPEDWINDOW | WS_VSCROLL,
         CW_USEDEFAULT, CW_USEDEFAULT, 500, 700,
         NULL, NULL, hInstance, NULL
