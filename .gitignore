@@ -1,0 +1,14 @@
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+bin/
+.vs/
+*.sln
+*.vcxproj
+*.filters
+*.user
+capture.png
+debug_state.log
+build/
