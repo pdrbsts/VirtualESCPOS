@@ -39,9 +39,7 @@ This will compile the source files and generate `VirtualESCPOS.exe`.
 
 1. Run `VirtualESCPOS.exe`.
 2. The application will start listening on `localhost:9100`.
-3. Send raw ESC/POS data to the port:
-   - You can use the provided `test_gs_star.py` for testing.
-   - Or send raw binary files using tools like `netcat` or custom scripts.
+3. Send raw ESC/POS data to the port.
 
 ## Contributing
 
