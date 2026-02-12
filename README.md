@@ -1,4 +1,4 @@
-# VirtualESCPOS
+# Virtual ESC/POS Printer
 
 A lightweight C++ Virtual Printer for Windows that simulates an ESC/POS thermal printer. It listens on a TCP port and renders the received raw data in a window, supporting text formatting, bitmaps, and cuts.
 
