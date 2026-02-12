@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #include "resource.h"
 #include <vector>
 #include <string>
@@ -11,13 +12,215 @@
 #include "VirtualPrinter.h"
 #include "Network.h"
 
+// Registry key path
+static const wchar_t* REG_KEY_PATH = L"Software\\MAPENO\\VirtualESCPOS";
+static const wchar_t* REG_VAL_PORTA = L"Porto";
+static const wchar_t* REG_VAL_COLUNAS = L"Colunas";
+static const wchar_t* REG_VAL_WIN_X = L"WinX";
+static const wchar_t* REG_VAL_WIN_Y = L"WinY";
+static const wchar_t* REG_VAL_WIN_W = L"WinW";
+static const wchar_t* REG_VAL_WIN_H = L"WinH";
+static const wchar_t* REG_VAL_WIN_MAX = L"WinMax";
+
+#define WM_TRAYICON (WM_USER + 2)
+#define ID_TRAY_APP_ICON 1001
+#define IDM_RESTORE 1002
+
+void AddTrayIcon(HWND hwnd) {
+    NOTIFYICONDATA nid = { 0 };
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY_APP_ICON;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAYICON;
+    nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON1));
+    wcscpy_s(nid.szTip, L"MAPENO Impressora Virtual ESC/POS");
+    Shell_NotifyIcon(NIM_ADD, &nid);
+}
+
+void RemoveTrayIcon(HWND hwnd) {
+    NOTIFYICONDATA nid = { 0 };
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = ID_TRAY_APP_ICON;
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+}
+
 // Global variables
 VirtualPrinter printer;
 NetworkServer server;
 HWND hMainWindow;
+HINSTANCE hAppInstance;
 std::vector<PrinterElement> currentElements;
 float currentY = 10.0f;
 float scale = 1.0f; // Zoom factor, maybe?
+
+// Settings
+int g_porta = 9100;
+int g_colunas = 0;
+// Window settings defaults
+int g_winX = CW_USEDEFAULT;
+int g_winY = CW_USEDEFAULT;
+int g_winW = 500;
+int g_winH = 700;
+bool g_winMax = false;
+
+// ---- Registry helpers ----
+
+void LoadSettings() {
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, REG_KEY_PATH, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwType = REG_DWORD;
+        DWORD dwSize = sizeof(DWORD);
+        DWORD dwValue;
+
+        if (RegQueryValueEx(hKey, REG_VAL_PORTA, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
+            g_porta = (int)dwValue;
+        }
+
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_COLUNAS, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
+            g_colunas = (int)dwValue;
+        }
+        
+        // Window placement
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_WIN_X, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winX = (int)dwValue;
+        
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_WIN_Y, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winY = (int)dwValue;
+
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_WIN_W, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winW = (int)dwValue;
+
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_WIN_H, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winH = (int)dwValue;
+
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_WIN_MAX, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winMax = (dwValue != 0);
+
+        RegCloseKey(hKey);
+    }
+}
+
+void SaveSettings() {
+    // Update globals from current window state if window exists
+    if (hMainWindow) {
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        if (GetWindowPlacement(hMainWindow, &wp)) {
+            g_winX = wp.rcNormalPosition.left;
+            g_winY = wp.rcNormalPosition.top;
+            g_winW = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+            g_winH = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+            g_winMax = (wp.showCmd == SW_SHOWMAXIMIZED);
+        }
+    }
+
+    HKEY hKey;
+    DWORD dwDisposition;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, REG_KEY_PATH, 0, NULL, 0, KEY_WRITE, NULL, &hKey, &dwDisposition) == ERROR_SUCCESS) {
+        DWORD dwValue;
+
+        dwValue = (DWORD)g_porta;
+        RegSetValueEx(hKey, REG_VAL_PORTA, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+
+        dwValue = (DWORD)g_colunas;
+        RegSetValueEx(hKey, REG_VAL_COLUNAS, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+        
+        dwValue = (DWORD)g_winX;
+        RegSetValueEx(hKey, REG_VAL_WIN_X, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+        
+        dwValue = (DWORD)g_winY;
+        RegSetValueEx(hKey, REG_VAL_WIN_Y, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+        
+        dwValue = (DWORD)g_winW;
+        RegSetValueEx(hKey, REG_VAL_WIN_W, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+        
+        dwValue = (DWORD)g_winH;
+        RegSetValueEx(hKey, REG_VAL_WIN_H, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+        
+        dwValue = g_winMax ? 1 : 0;
+        RegSetValueEx(hKey, REG_VAL_WIN_MAX, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+
+        RegCloseKey(hKey);
+    }
+}
+
+// ---- Menu helpers ----
+
+HMENU CreateMainMenu() {
+    HMENU hMenu = CreateMenu();
+    HMENU hSubMenu = CreatePopupMenu();
+
+    AppendMenu(hSubMenu, MF_STRING, IDM_PORTA, L"&Porto...");
+    AppendMenu(hSubMenu, MF_STRING, IDM_COLUNAS, L"&Colunas...");
+    AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hSubMenu, MF_STRING, IDM_SAIR, L"&Sair");
+
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hSubMenu, L"&Menu");
+
+    return hMenu;
+}
+
+// ---- Input dialog ----
+// Simple modal dialog for entering a numeric value, built at runtime (no .rc template needed)
+
+static int s_dialogValue = 0;
+static const wchar_t* s_dialogTitle = L"";
+
+INT_PTR CALLBACK InputDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_INITDIALOG:
+    {
+        SetWindowText(hDlg, s_dialogTitle);
+        HWND hEdit = GetDlgItem(hDlg, IDC_EDIT_VALUE);
+        wchar_t buf[32];
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%d", s_dialogValue);
+        SetWindowText(hEdit, buf);
+        SetFocus(hEdit);
+        SendMessage(hEdit, EM_SETSEL, 0, -1);
+        return FALSE; // We set focus manually
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            HWND hEdit = GetDlgItem(hDlg, IDC_EDIT_VALUE);
+            wchar_t buf[32];
+            GetWindowText(hEdit, buf, _countof(buf));
+            s_dialogValue = _wtoi(buf);
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        } else if (LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    case WM_CLOSE:
+        EndDialog(hDlg, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// DialogBox using resource
+INT_PTR ShowInputDialog(HWND hParent, const wchar_t* title, int currentValue) {
+    s_dialogTitle = title;
+    s_dialogValue = currentValue;
+
+    INT_PTR result = DialogBox(hAppInstance, MAKEINTRESOURCE(IDD_INPUT_DLG), hParent, InputDlgProc);
+
+    if (result == IDOK) {
+        return s_dialogValue;
+    }
+    return -1; // Cancelled
+}
+
+
+// Update the window title with current port
+void UpdateWindowTitle() {
+    wchar_t title[128];
+    _snwprintf_s(title, _countof(title), _TRUNCATE, L"Impressora ESC/POS Virtual (Porto %d)", g_porta);
+    SetWindowText(hMainWindow, title);
+}
 
 // Function to handle repaint
 void UpdatePrinter(void* param) {
@@ -97,6 +300,82 @@ std::vector<unsigned char> ConvertToDIB(const std::vector<unsigned char>& src, i
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xFFF0) == SC_MINIMIZE) {
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+        break;
+
+    case WM_COMMAND:
+    {
+        switch (LOWORD(wParam)) {
+        case IDM_PORTA:
+        {
+            INT_PTR newPort = ShowInputDialog(hwnd, L"Porto TCP", g_porta);
+            if (newPort >= 0) {
+                int oldPort = g_porta;
+                g_porta = (int)newPort;
+                SaveSettings();
+                UpdateWindowTitle();
+
+                // Restart the server on the new port
+                if (g_porta != oldPort) {
+                    server.Stop();
+                    if (!server.Start(g_porta, [](const unsigned char* data, int len) {
+                        printer.ProcessData(data, len);
+                    })) {
+                        wchar_t msg[128];
+                        _snwprintf_s(msg, _countof(msg), _TRUNCATE,
+                            L"Falha ao iniciar o servidor no porto %d.\nO porto pode estar em uso.", g_porta);
+                        MessageBox(hwnd, msg, L"Erro", MB_OK | MB_ICONERROR);
+                    }
+                }
+            }
+            return 0;
+        }
+        case IDM_COLUNAS:
+        {
+            INT_PTR newCols = ShowInputDialog(hwnd, L"Colunas (0 = sem limite)", g_colunas);
+            if (newCols >= 0) {
+                g_colunas = (int)newCols;
+                SaveSettings();
+                printer.SetMaxColumns(g_colunas);
+            }
+            return 0;
+        }
+        case IDM_SAIR:
+            DestroyWindow(hwnd);
+            return 0;
+        case IDM_RESTORE:
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            return 0;
+        }
+        break;
+    }
+    
+    case WM_TRAYICON:
+    {
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+             ShowWindow(hwnd, SW_RESTORE);
+             SetForegroundWindow(hwnd);
+        }
+        else if (lParam == WM_RBUTTONUP) {
+            POINT pt;
+            GetCursorPos(&pt);
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenu(hMenu, MF_STRING, IDM_RESTORE, L"Restaurar");
+            AppendMenu(hMenu, MF_STRING, IDM_SAIR, L"Sair");
+            
+            SetForegroundWindow(hwnd); // Necessary for TrackPopupMenu
+            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            PostMessage(hwnd, WM_NULL, 0, 0); // Cleanup
+            DestroyMenu(hMenu);
+        }
+        return 0;
+    }
+
     case WM_MOUSEWHEEL:
     {
         int cxDelta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -125,7 +404,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_EXITSIZEMOVE:
+        SaveSettings();
+        return 0;
+
     case WM_DESTROY:
+        SaveSettings();
         PostQuitMessage(0);
         return 0;
 
@@ -242,29 +526,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     SetTextColor(hdc, RGB(0, 0, 0));
                 }
 
-                // Adjust Y if double height? 
-                // We advance Y based on line height. 
-                // If we have mixed height on one line, we should probably align baseline.
-                // TextOut aligns to Top-Left by default. 
-                // It's tricky with simple TextOut. 
-                // Let's assume baseline is at y + 16 (normal)? 
-                // Or just draw top-aligned. Largest element defines line height.
-                // But we are in a simple flow: "currentX". 
-                // If we change font size, "y" is fixed for the current line?
-                // Wait, Y is incremented when newline.
-                // If we have Mixed content on same line: "Small Big Small"
-                // The logical "line" should accommodate the Big one.
-                // But my current logic increments Y only on NEWLINE.
-                // So all text on this line will share same Y (top).
-                // "Big" text will extend downwards. "Small" text will be at top.
-                // Ideally we want bottom alignment (baseline).
-                // SetTextAlign(hdc, TA_BASELINE) could help? 
-                // TA_BASELINE requires us to know where the baseline is.
-                // Let's enable TA_BASELINE?
-                // Or simpler: Calculate max height of the line? 
-                // Too complex for this prompt. Let's stick to Top alignment (TA_TOP default).
-                // It will look like top-aligned. It's acceptable for simple sim.
-                
                 TextOut(hdc, currentX, y, el.text.c_str(), (int)el.text.length());
                 currentX += size.cx;
 
@@ -379,6 +640,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    hAppInstance = hInstance;
+
+    // Load settings from registry
+    LoadSettings();
+
     const wchar_t CLASS_NAME[] = L"VirtualESCPOSWindow";
 
     WNDCLASS wc = { };
@@ -391,10 +657,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     RegisterClass(&wc);
 
+    // Build window title with current port
+    wchar_t windowTitle[128];
+    _snwprintf_s(windowTitle, _countof(windowTitle), _TRUNCATE, L"Impressora ESC/POS Virtual (Porto %d)", g_porta);
+
     hMainWindow = CreateWindowEx(
-        0, CLASS_NAME, L"Impressora ESC/POS Virtual (Porto 9100)",
+        0, CLASS_NAME, windowTitle,
         WS_OVERLAPPEDWINDOW | WS_VSCROLL,
-        CW_USEDEFAULT, CW_USEDEFAULT, 500, 700,
+        g_winX, g_winY, g_winW, g_winH,
         NULL, NULL, hInstance, NULL
     );
 
@@ -402,16 +672,30 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         return 0;
     }
 
-    ShowWindow(hMainWindow, nCmdShow);
+    // Attach menu
+    HMENU hMenu = CreateMainMenu();
+    SetMenu(hMainWindow, hMenu);
+
+    ShowWindow(hMainWindow, g_winMax ? SW_SHOWMAXIMIZED : nCmdShow);
+    
+    // Add Tray Icon
+    AddTrayIcon(hMainWindow);
+    UpdateWindowTitle(); // Sets tooltip too if I update the function, but for now tooltip is static "Virtual ESC/POS Printer"
 
     // Setup printer callback
     printer.SetRepaintCallback(UpdatePrinter, NULL);
 
-    // Start network server
-    if (!server.Start(9100, [](const unsigned char* data, int len) {
+    // Apply columns setting to the printer
+    printer.SetMaxColumns(g_colunas);
+
+    // Start network server on the configured port
+    if (!server.Start(g_porta, [](const unsigned char* data, int len) {
         printer.ProcessData(data, len);
     })) {
-        MessageBox(hMainWindow, L"Failed to start server on port 9100. Port might be in use.", L"Error", MB_OK | MB_ICONERROR);
+        wchar_t msg[128];
+        _snwprintf_s(msg, _countof(msg), _TRUNCATE,
+            L"Falha ao iniciar o servidor no porto %d.\nO porto pode estar em uso.", g_porta);
+        MessageBox(hMainWindow, msg, L"Erro", MB_OK | MB_ICONERROR);
     }
 
     // Main loop
