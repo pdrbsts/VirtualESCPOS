@@ -9,7 +9,7 @@ rc /fo version.res version.rc
 echo Compiling VirtualESCPOS...
 cl /nologo /EHsc /std:c++17 /MD /D_CRT_SECURE_NO_WARNINGS ^
     main.cpp VirtualPrinter.cpp Network.cpp version.res ^
-    User32.lib Gdi32.lib Ws2_32.lib Advapi32.lib Shell32.lib ^
+    User32.lib Gdi32.lib Ws2_32.lib Advapi32.lib Shell32.lib Comdlg32.lib ^
     /Fe:bin\VirtualESCPOS.exe
 
 if %ERRORLEVEL% EQU 0 (

@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include "resource.h"
 #include <vector>
@@ -52,6 +53,8 @@ NetworkServer server;
 HWND hMainWindow;
 HINSTANCE hAppInstance;
 std::vector<PrinterElement> currentElements;
+std::vector<unsigned char> g_rawBuffer;
+const size_t MAX_BUFFER_SIZE = 1024 * 1024; // 1MB Limit
 float currentY = 10.0f;
 float scale = 1.0f; // Zoom factor, maybe?
 
@@ -155,6 +158,7 @@ HMENU CreateMainMenu() {
     AppendMenu(hSubMenu, MF_STRING, IDM_PORTA, L"&Porto...");
     AppendMenu(hSubMenu, MF_STRING, IDM_COLUNAS, L"&Colunas...");
     AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hSubMenu, MF_STRING, IDM_SALVAR, L"&Salvar");
     AppendMenu(hSubMenu, MF_STRING, IDM_SAIR, L"&Sair");
 
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hSubMenu, L"&Menu");
@@ -324,12 +328,52 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     server.Stop();
                     if (!server.Start(g_porta, [](const unsigned char* data, int len) {
                         printer.ProcessData(data, len);
+
+                        // Buffer data logic
+                        if (g_rawBuffer.size() + len > MAX_BUFFER_SIZE) {
+                            size_t overflow = (g_rawBuffer.size() + len) - MAX_BUFFER_SIZE;
+                            if (overflow < g_rawBuffer.size()) {
+                                g_rawBuffer.erase(g_rawBuffer.begin(), g_rawBuffer.begin() + overflow);
+                            } else {
+                                g_rawBuffer.clear();
+                                if ((size_t)len > MAX_BUFFER_SIZE) {
+                                     data += (len - MAX_BUFFER_SIZE);
+                                     len = MAX_BUFFER_SIZE;
+                                }
+                            }
+                        }
+                        g_rawBuffer.insert(g_rawBuffer.end(), data, data + len);
                     })) {
                         wchar_t msg[128];
                         _snwprintf_s(msg, _countof(msg), _TRUNCATE,
                             L"Falha ao iniciar o servidor no porto %d.\nO porto pode estar em uso.", g_porta);
                         MessageBox(hwnd, msg, L"Erro", MB_OK | MB_ICONERROR);
                     }
+                }
+            }
+            return 0;
+        }
+        case IDM_SALVAR:
+        {
+            wchar_t filename[MAX_PATH] = L"impressora.txt";
+            OPENFILENAME ofn = { 0 };
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = filename;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrDefExt = L"txt";
+            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+            if (GetSaveFileName(&ofn)) {
+                HANDLE hFile = CreateFile(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    DWORD written;
+                    WriteFile(hFile, g_rawBuffer.data(), (DWORD)g_rawBuffer.size(), &written, NULL);
+                    CloseHandle(hFile);
+                    MessageBox(hwnd, L"Ficheiro guardado com sucesso.", L"Sucesso", MB_OK | MB_ICONINFORMATION);
+                } else {
+                    MessageBox(hwnd, L"Erro ao criar ficheiro.", L"Erro", MB_OK | MB_ICONERROR);
                 }
             }
             return 0;
@@ -492,7 +536,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     // If height is 16, normal width is ~9. Double is ~18.
                     // If height is 32, normal width is ~19. Double is ~38.
                     // Let's use 0 for normal, and explicit for double.
-                    fnWidth = el.isDoubleHeight ? 25 : 12; // Adjusted for visual approximation
+                    fnWidth = el.isDoubleHeight ? 38 : 19; // Adjusted for visual approximation
                 }
 
                 HFONT hFontToUse = hFontNormal;
@@ -691,6 +735,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     // Start network server on the configured port
     if (!server.Start(g_porta, [](const unsigned char* data, int len) {
         printer.ProcessData(data, len);
+        
+        // Buffer data logic
+        if (g_rawBuffer.size() + len > MAX_BUFFER_SIZE) {
+            size_t overflow = (g_rawBuffer.size() + len) - MAX_BUFFER_SIZE;
+            if (overflow < g_rawBuffer.size()) {
+                g_rawBuffer.erase(g_rawBuffer.begin(), g_rawBuffer.begin() + overflow);
+            } else {
+                g_rawBuffer.clear();
+                if ((size_t)len > MAX_BUFFER_SIZE) {
+                        data += (len - MAX_BUFFER_SIZE);
+                        len = MAX_BUFFER_SIZE;
+                }
+            }
+        }
+        g_rawBuffer.insert(g_rawBuffer.end(), data, data + len);
     })) {
         wchar_t msg[128];
         _snwprintf_s(msg, _countof(msg), _TRUNCATE,
