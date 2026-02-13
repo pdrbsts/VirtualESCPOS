@@ -20,5 +20,4 @@ test_gs_star.py
 .build/
 # .swiftpm/ - Swift Package Manager local state
 .swiftpm/
-# bin/VirtualESCPOS.app - Mac application bundle
-bin/VirtualESCPOS.app/
+
