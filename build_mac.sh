@@ -34,6 +34,14 @@ if [ $? -eq 0 ]; then
     chmod +x "$MACOS_DIR/$APP_NAME"
 
     echo "Done! Application bundle is at $APP_BUNDLE"
+
+    # Create a zip file for distribution
+    ZIP_NAME="$APP_NAME.mac.zip"
+    echo "Creating zip archive: bin/$ZIP_NAME"
+    # -r recursive, -y store symlinks as links not referenced file
+    # Run in subshell to not change script cwd
+    (cd bin && zip -r -y "$ZIP_NAME" "$APP_NAME.app")
+    echo "Zip archive created at bin/$ZIP_NAME"
 else
     echo "Build failed."
     exit 1
