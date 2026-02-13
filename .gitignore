@@ -14,3 +14,11 @@ capture.png
 debug_state.log
 build/
 test_gs_star.py
+# Mac OS
+.DS_Store
+# .build/ - Swift build directory
+.build/
+# .swiftpm/ - Swift Package Manager local state
+.swiftpm/
+# bin/VirtualESCPOS.app - Mac application bundle
+bin/VirtualESCPOS.app/

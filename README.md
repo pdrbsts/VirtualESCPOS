@@ -1,4 +1,4 @@
-# Virtual ESC/POS Printer
+# VirtualESCPOS
 
 A lightweight C++ Virtual Printer for Windows that simulates an ESC/POS thermal printer. It listens on a TCP port and renders the received raw data in a window, supporting text formatting, bitmaps, and cuts.
 
@@ -39,7 +39,9 @@ This will compile the source files and generate `VirtualESCPOS.exe`.
 
 1. Run `VirtualESCPOS.exe`.
 2. The application will start listening on `localhost:9100`.
-3. Send raw ESC/POS data to the port.
+3. Send raw ESC/POS data to the port:
+   - You can use the provided `test_gs_star.py` for testing.
+   - Or send raw binary files using tools like `netcat` or custom scripts.
 
 ## Contributing
 
