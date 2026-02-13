@@ -55,7 +55,7 @@ This will compile the application and create a Mac App Bundle at `bin/VirtualESC
 
 1. Run the application:
    - **Windows**: `bin\VirtualESCPOS.exe`
-   - **macOS**: Open `bin/VirtualESCPOS.app` (or unzip `bin/VirtualESCPOS.mac.zip` and run it).
+   - **macOS**: Open `bin/VirtualESCPOS.dmg` (mount it and drag the app to your Applications folder) or unzip `bin/VirtualESCPOS.mac.zip`.
 2. The application will start listening on `localhost:9100`.
 3. Send raw ESC/POS data to the port:
    - You can use the provided `test_gs_star.py` for testing.

@@ -42,6 +42,14 @@ if [ $? -eq 0 ]; then
     # Run in subshell to not change script cwd
     (cd bin && zip -r -y "$ZIP_NAME" "$APP_NAME.app")
     echo "Zip archive created at bin/$ZIP_NAME"
+
+    # Create a DMG for distribution
+    DMG_NAME="bin/$APP_NAME.dmg"
+    VOL_NAME="$APP_NAME"
+    echo "Creating DMG: $DMG_NAME"
+    rm -f "$DMG_NAME"
+    hdiutil create -volname "$VOL_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DMG_NAME"
+    echo "DMG created at $DMG_NAME"
 else
     echo "Build failed."
     exit 1
