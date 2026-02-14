@@ -11,23 +11,14 @@ let package = Package(
             name: "VirtualESCPOS",
             path: ".",
             exclude: [
-                "main.cpp", // Windows entry point, excluded
-                "build.bat",
-                "icon.ico",
-                "resource.h",
-                "version.rc",
-                "bin",
-                ".git",
-                ".gitignore",
-                "README.md",
-                "Mac/Info.plist" // Will be handled if we use an actual Xcode project, but for SwiftPM executable we just compile sources
+                "Source/Info.plist"
             ],
             sources: [
                 "Network.cpp",
                 "VirtualPrinter.cpp",
-                "Mac/main.m",
-                "Mac/AppDelegate.mm", // Boxed C++ 
-                "Mac/PrinterView.mm"
+                "Source/main.m",
+                "Source/AppDelegate.mm", // Boxed C++ 
+                "Source/PrinterView.mm"
             ],
             publicHeadersPath: "include", // We don't really have public headers, but this quiets some warnings or we can omit
             cxxSettings: [
@@ -39,7 +30,7 @@ let package = Package(
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
-                    "-Xlinker", "Mac/Info.plist"
+                    "-Xlinker", "Source/Info.plist"
                 ])
             ]
         )

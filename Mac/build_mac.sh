@@ -1,11 +1,25 @@
 #!/bin/bash
 
+# Ensure we are in the script directory
+cd "$(dirname "$0")"
+
+# Symlink source files from parent directory
+echo "Linking shared sources..."
+ln -sf ../Network.cpp Network.cpp
+ln -sf ../Network.h Network.h
+ln -sf ../VirtualPrinter.cpp VirtualPrinter.cpp
+ln -sf ../VirtualPrinter.h VirtualPrinter.h
+
 # Build for release
-echo "Building VirtualESCPOS for macOS..."
+echo "Building VirtualESCPOS..."
 swift build -c release
+BUILD_RESULT=$?
+
+# Restore (remove links)
+rm Network.cpp Network.h VirtualPrinter.cpp VirtualPrinter.h
 
 # Check if build was successful
-if [ $? -eq 0 ]; then
+if [ $BUILD_RESULT -eq 0 ]; then
     echo "Build successful."
     
     # Create bin directory if it doesn't exist
@@ -13,7 +27,7 @@ if [ $? -eq 0 ]; then
     
     # Define App Bundle structure
     APP_NAME="VirtualESCPOS"
-    APP_BUNDLE="bin/$APP_NAME.app"
+    APP_BUNDLE="dist/$APP_NAME.app"
     CONTENTS_DIR="$APP_BUNDLE/Contents"
     MACOS_DIR="$CONTENTS_DIR/MacOS"
     RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -25,11 +39,11 @@ if [ $? -eq 0 ]; then
 
     # Copy Info.plist
     # We should have one, let's copy the one created earlier
-    cp Mac/Info.plist "$CONTENTS_DIR/Info.plist"
+    cp Source/Info.plist "$CONTENTS_DIR/Info.plist"
 
     # Copy AppIcon.icns
-    if [ -f "Mac/AppIcon.icns" ]; then
-        cp Mac/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
+    if [ -f "Source/AppIcon.icns" ]; then
+        cp Source/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
     else
         echo "Warning: Mac/AppIcon.icns not found, skipping icon."
     fi
@@ -44,14 +58,14 @@ if [ $? -eq 0 ]; then
 
     # Create a zip file for distribution
     ZIP_NAME="$APP_NAME.mac.zip"
-    echo "Creating zip archive: bin/$ZIP_NAME"
+    echo "Creating zip archive: dist/$ZIP_NAME"
     # -r recursive, -y store symlinks as links not referenced file
     # Run in subshell to not change script cwd
-    (cd bin && zip -r -y "$ZIP_NAME" "$APP_NAME.app")
-    echo "Zip archive created at bin/$ZIP_NAME"
+    (cd dist && zip -r -y "../dist/$ZIP_NAME" "$APP_NAME.app")
+    echo "Zip archive created at dist/$ZIP_NAME"
 
     # Create a DMG for distribution
-    DMG_NAME="bin/$APP_NAME.dmg"
+    DMG_NAME="dist/$APP_NAME.dmg"
     VOL_NAME="$APP_NAME"
     echo "Creating DMG: $DMG_NAME"
     rm -f "$DMG_NAME"
