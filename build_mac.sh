@@ -27,6 +27,13 @@ if [ $? -eq 0 ]; then
     # We should have one, let's copy the one created earlier
     cp Mac/Info.plist "$CONTENTS_DIR/Info.plist"
 
+    # Copy AppIcon.icns
+    if [ -f "Mac/AppIcon.icns" ]; then
+        cp Mac/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
+    else
+        echo "Warning: Mac/AppIcon.icns not found, skipping icon."
+    fi
+
     # Copy binary
     cp .build/release/VirtualESCPOS "$MACOS_DIR/$APP_NAME"
 
