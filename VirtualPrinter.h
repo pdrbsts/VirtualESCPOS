@@ -35,9 +35,11 @@ public:
     ~VirtualPrinter();
 
     void Reset();
+    void Clear();
     void ProcessData(const unsigned char* data, int length);
     std::vector<PrinterElement> GetElements();
     void SetRepaintCallback(void (*callback)(void*), void* param);
+    void SetMaxColumns(int cols);
 
 private:
     std::vector<PrinterElement> elements;
@@ -100,6 +102,10 @@ private:
     
     // Code Page
     int currentCodePage; // 0=PC437, 2=PC850, 3=PC860, etc.
+
+    // Max columns (0 = disabled)
+    int maxColumns;
+    int currentColumn; // Current column position for auto-CRLF
 
     // Current text buffer
     std::wstring currentText;

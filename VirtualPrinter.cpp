@@ -73,6 +73,8 @@ VirtualPrinter::VirtualPrinter() {
     downloadedBitmapExpected = 0;
     currentCodePage = 0; // Default PC437
     currentText = L"";
+    maxColumns = 0;
+    currentColumn = 0;
 }
 
 VirtualPrinter::~VirtualPrinter() {
@@ -93,6 +95,29 @@ void VirtualPrinter::Reset() {
     // We'll keep it.
     currentCodePage = 0; // Default PC437
     currentText = L"";
+    currentColumn = 0;
+    if (repaintCallback) repaintCallback(repaintParam);
+}
+
+void VirtualPrinter::Clear() {
+    std::lock_guard<std::mutex> lock(mutex);
+    elements.clear();
+    state = STATE_NORMAL;
+    isRedMode = false;
+    isDoubleWidthMode = false;
+    isDoubleHeightMode = false;
+    isUnderlineMode = false;
+    currentLineSpacing = -1; // Auto
+    
+    // Clear cache
+    downloadedBitmap.clear();
+    downloadedBitmapWidthBytes = 0;
+    downloadedBitmapHeightBytes = 0;
+    downloadedBitmapExpected = 0;
+
+    currentCodePage = 0; // Default PC437
+    currentText = L"";
+    currentColumn = 0;
     if (repaintCallback) repaintCallback(repaintParam);
 }
 
@@ -121,6 +146,7 @@ void VirtualPrinter::AddNewLine() {
         el.height = 0; // Use default auto logic
     }
     elements.push_back(el);
+    currentColumn = 0; // Reset column on newline
 }
 
 void VirtualPrinter::AddCutLine() {
@@ -163,6 +189,11 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     // We should definitely ignore 0x00 (NUL)
                     if (b >= 0x20 || (b > 0x7F && b != 0xFF)) { // 0x80+ are extended chars. 0xFF often ignored?
                          currentText += MapChar(b, currentCodePage);
+                         currentColumn++;
+                         // Auto-CRLF if maxColumns is set
+                         if (maxColumns > 0 && currentColumn >= maxColumns) {
+                             AddNewLine();
+                         }
                     }
                 }
                 break;
@@ -477,4 +508,9 @@ std::vector<PrinterElement> VirtualPrinter::GetElements() {
 void VirtualPrinter::SetRepaintCallback(void (*callback)(void*), void* param) {
     repaintCallback = callback;
     repaintParam = param;
+}
+
+void VirtualPrinter::SetMaxColumns(int cols) {
+    maxColumns = cols;
+    currentColumn = 0;
 }
