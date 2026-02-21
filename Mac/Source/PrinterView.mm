@@ -33,16 +33,18 @@
 
   CGContextRef context = [[NSGraphicsContext currentContext] CGContext];
 
+  extern int g_fontSize;
+
   CGFloat y = 10.0;
   CGFloat currentX = 10.0;
   CGFloat leftMargin = 10.0;
-  CGFloat currentLineMaxHeight = 20.0;
+  CGFloat currentLineMaxHeight = g_fontSize + 4;
   CGFloat width = self.bounds.size.width;
 
   // Font setup
-  NSFont *fontNormal = [NSFont fontWithName:@"Courier New" size:16];
+  NSFont *fontNormal = [NSFont fontWithName:@"Courier New" size:g_fontSize];
   if (!fontNormal)
-    fontNormal = [NSFont userFixedPitchFontOfSize:16];
+    fontNormal = [NSFont userFixedPitchFontOfSize:g_fontSize];
 
   NSDictionary *attrsNormal = @{
     NSFontAttributeName : fontNormal,
@@ -97,12 +99,12 @@
       } else {
         y += currentLineMaxHeight + 4;
       }
-      currentLineMaxHeight = 20.0;
+      currentLineMaxHeight = g_fontSize + 4;
     } else if (el.type == ELEMENT_CUT) {
       if (currentX != leftMargin) {
         currentX = leftMargin;
         y += currentLineMaxHeight + 4;
-        currentLineMaxHeight = 20.0;
+        currentLineMaxHeight = g_fontSize + 4;
       }
       y += 10;
 
@@ -123,7 +125,7 @@
       if (currentX != leftMargin) {
         currentX = leftMargin;
         y += currentLineMaxHeight + 4;
-        currentLineMaxHeight = 20;
+        currentLineMaxHeight = g_fontSize + 4;
       }
       // Implementation of bitmap drawing
       // Convert data if needed
