@@ -11,6 +11,7 @@
 #define IDM_SALVAR      204
 #define IDM_FONTE       205
 #define IDM_LIMPAR      206
+#define IDM_ALWAYSONTOP 207
 
 // Dialog IDs
 #define IDD_INPUT_DLG   300

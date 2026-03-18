@@ -23,6 +23,7 @@ static const wchar_t* REG_VAL_WIN_W = L"WinW";
 static const wchar_t* REG_VAL_WIN_H = L"WinH";
 static const wchar_t* REG_VAL_WIN_MAX = L"WinMax";
 static const wchar_t* REG_VAL_FONTE = L"Fonte";
+static const wchar_t* REG_VAL_ALWAYSONTOP = L"AlwaysOnTop";
 
 #define WM_TRAYICON (WM_USER + 2)
 #define ID_TRAY_APP_ICON 1001
@@ -69,6 +70,7 @@ int g_winY = CW_USEDEFAULT;
 int g_winW = 500;
 int g_winH = 700;
 bool g_winMax = false;
+bool g_alwaysOnTop = false;
 
 // ---- Registry helpers ----
 
@@ -104,9 +106,13 @@ void LoadSettings() {
         dwSize = sizeof(DWORD);
         if (RegQueryValueEx(hKey, REG_VAL_WIN_MAX, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) g_winMax = (dwValue != 0);
 
-        dwSize = sizeof(DWORD);
         if (RegQueryValueEx(hKey, REG_VAL_FONTE, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
             if ((int)dwValue > 0) g_fontSize = (int)dwValue;
+        }
+
+        dwSize = sizeof(DWORD);
+        if (RegQueryValueEx(hKey, REG_VAL_ALWAYSONTOP, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
+            g_alwaysOnTop = (dwValue != 0);
         }
 
         RegCloseKey(hKey);
@@ -155,6 +161,9 @@ void SaveSettings() {
         dwValue = (DWORD)g_fontSize;
         RegSetValueEx(hKey, REG_VAL_FONTE, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
 
+        dwValue = g_alwaysOnTop ? 1 : 0;
+        RegSetValueEx(hKey, REG_VAL_ALWAYSONTOP, 0, REG_DWORD, (LPBYTE)&dwValue, sizeof(DWORD));
+
         RegCloseKey(hKey);
     }
 }
@@ -168,6 +177,7 @@ HMENU CreateMainMenu() {
     AppendMenu(hSubMenu, MF_STRING, IDM_PORTA, L"&Porto...");
     AppendMenu(hSubMenu, MF_STRING, IDM_COLUNAS, L"&Colunas...");
     AppendMenu(hSubMenu, MF_STRING, IDM_FONTE, L"&Tamanho do texto...");
+    AppendMenu(hSubMenu, MF_STRING | (g_alwaysOnTop ? MF_CHECKED : MF_UNCHECKED), IDM_ALWAYSONTOP, L"&Sempre no topo");
     AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hSubMenu, MF_STRING, IDM_LIMPAR, L"&Limpar");
     AppendMenu(hSubMenu, MF_STRING, IDM_SALVAR, L"Salvar");
@@ -423,6 +433,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 SaveSettings();
                 InvalidateRect(hwnd, NULL, TRUE);
             }
+            return 0;
+        }
+        case IDM_ALWAYSONTOP:
+        {
+            g_alwaysOnTop = !g_alwaysOnTop;
+            SetWindowPos(hwnd, g_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            
+            // Update menu checkmark
+            HMENU hMenu = GetMenu(hwnd);
+            if (hMenu) {
+                CheckMenuItem(hMenu, IDM_ALWAYSONTOP, g_alwaysOnTop ? MF_CHECKED : MF_UNCHECKED);
+            }
+            
+            SaveSettings();
             return 0;
         }
         case IDM_RESTORE:
@@ -758,6 +782,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     SetMenu(hMainWindow, hMenu);
 
     ShowWindow(hMainWindow, g_winMax ? SW_SHOWMAXIMIZED : nCmdShow);
+    
+    if (g_alwaysOnTop) {
+        SetWindowPos(hMainWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
     
     // Add Tray Icon
     AddTrayIcon(hMainWindow);
