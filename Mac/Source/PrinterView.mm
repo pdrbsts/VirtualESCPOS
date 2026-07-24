@@ -34,6 +34,7 @@
   CGContextRef context = [[NSGraphicsContext currentContext] CGContext];
 
   extern int g_fontSize;
+  extern int g_columns;
 
   CGFloat y = 10.0;
   CGFloat currentX = 10.0;
@@ -51,8 +52,58 @@
     NSForegroundColorAttributeName : [NSColor blackColor]
   };
 
-  for (const auto &el : elements) {
+  // Reference width for justification (ESC a). When the user has set a fixed
+  // column count ("Colunas"), center/right within that paper width
+  // (columns * character width); otherwise fall back to the view width.
+  CGFloat charWidth = [@"0" sizeWithAttributes:attrsNormal].width;
+  CGFloat paperWidth = (g_columns > 0) ? g_columns * charWidth : 0;
+
+  // Total drawn width of the run of TEXT elements starting at startIdx, up to
+  // the next line break (NEWLINE / CUT / BITMAP) or the end of the list.
+  auto measureLineWidth = [&](size_t startIdx) -> CGFloat {
+    CGFloat total = 0;
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+      const auto &e = elements[i];
+      if (e.type != ELEMENT_TEXT)
+        break;
+      NSString *t =
+          [[NSString alloc] initWithBytes:e.text.data()
+                                   length:e.text.size() * sizeof(wchar_t)
+                                 encoding:NSUTF32LittleEndianStringEncoding];
+      CGFloat w0 = [t sizeWithAttributes:attrsNormal].width;
+      total += w0 * (e.isDoubleWidth ? 2.0 : 1.0);
+    }
+    return total;
+  };
+
+  auto alignStartX = [&](CGFloat contentWidth, int align) -> CGFloat {
+    CGFloat startX = leftMargin;
+    if (paperWidth > 0) {
+      if (align == 1)
+        startX = leftMargin + (paperWidth - contentWidth) / 2.0;
+      else if (align == 2)
+        startX = leftMargin + paperWidth - contentWidth;
+    } else {
+      if (align == 1)
+        startX = (width - contentWidth) / 2.0;
+      else if (align == 2)
+        startX = width - contentWidth - leftMargin;
+    }
+    if (startX < leftMargin)
+      startX = leftMargin;
+    return startX;
+  };
+
+  bool atLineStart = true;
+  for (size_t idx = 0; idx < elements.size(); ++idx) {
+    const auto &el = elements[idx];
     if (el.type == ELEMENT_TEXT) {
+      // At the first text segment of a line, offset the start position for
+      // center/right justification based on the whole line width.
+      if (atLineStart) {
+        currentX = alignStartX(measureLineWidth(idx), el.align);
+        atLineStart = false;
+      }
       // Font selection logic - always use normal font, scale using CTM
       NSFont *fontToUse = fontNormal;
 
@@ -94,6 +145,7 @@
       currentX += drawnWidth;
     } else if (el.type == ELEMENT_NEWLINE) {
       currentX = leftMargin;
+      atLineStart = true;
       if (el.height > 0) {
         y += el.height;
       } else {
@@ -121,12 +173,14 @@
              withAttributes:attrsNormal];
 
       y += 30;
+      atLineStart = true;
     } else if (el.type == ELEMENT_BITMAP) {
       if (currentX != leftMargin) {
         currentX = leftMargin;
         y += currentLineMaxHeight + 4;
         currentLineMaxHeight = g_fontSize + 4;
       }
+      atLineStart = true;
       // Implementation of bitmap drawing
       // Convert data if needed
       std::vector<unsigned char> rasterData;
@@ -222,17 +276,20 @@
 
         CGContextSaveGState(context);
 
+        // Apply justification (ESC a): center/right within the paper width
+        CGFloat drawX = alignStartX(el.width, el.align);
+
         // Flip context for image drawing
         CGContextTranslateCTM(context, 0, y + el.height);
         CGContextScaleCTM(context, 1.0, -1.0);
 
-        // Draw at (currentX, 0, width, height) in the transformed space
+        // Draw at (drawX, 0, width, height) in the transformed space
         // Wait, we translated to (0, y+h).
         // So new (0,0) is at old (0, y+h).
         // To draw from y to y+h:
         // We want the bottom of the image at the bottom of the rect?
 
-        CGRect imageRect = CGRectMake(currentX, 0, el.width, el.height);
+        CGRect imageRect = CGRectMake(drawX, 0, el.width, el.height);
         CGContextDrawImage(context, imageRect, image);
 
         CGContextRestoreGState(context);

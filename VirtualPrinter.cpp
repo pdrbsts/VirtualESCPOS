@@ -73,8 +73,14 @@ VirtualPrinter::VirtualPrinter() {
     downloadedBitmapExpected = 0;
     currentCodePage = 0; // Default PC437
     currentText = L"";
+    currentAlign = 0; // Left
     maxColumns = 0;
     currentColumn = 0;
+    escStarMode = 0;
+    escStarColumns = 0;
+    escStarBytesPerColumn = 0;
+    escStarBandHeight = 0;
+    escStarDataExpected = 0;
 }
 
 VirtualPrinter::~VirtualPrinter() {
@@ -95,6 +101,7 @@ void VirtualPrinter::Reset() {
     // We'll keep it.
     currentCodePage = 0; // Default PC437
     currentText = L"";
+    currentAlign = 0; // Left
     currentColumn = 0;
     if (repaintCallback) repaintCallback(repaintParam);
 }
@@ -117,6 +124,7 @@ void VirtualPrinter::Clear() {
 
     currentCodePage = 0; // Default PC437
     currentText = L"";
+    currentAlign = 0; // Left
     currentColumn = 0;
     if (repaintCallback) repaintCallback(repaintParam);
 }
@@ -126,10 +134,11 @@ void VirtualPrinter::FlushSegment() {
         PrinterElement el;
         el.type = ELEMENT_TEXT;
         el.text = currentText;
-        el.isRed = isRedMode; 
+        el.isRed = isRedMode;
         el.isDoubleWidth = isDoubleWidthMode;
         el.isDoubleHeight = isDoubleHeightMode;
         el.isUnderline = isUnderlineMode;
+        el.align = currentAlign;
         elements.push_back(el);
         currentText = L"";
     }
@@ -153,6 +162,56 @@ void VirtualPrinter::AddCutLine() {
     FlushSegment();
     PrinterElement el;
     el.type = ELEMENT_CUT;
+    elements.push_back(el);
+}
+
+void VirtualPrinter::CommitEscStarBand() {
+    int columns = escStarColumns;
+    int bandHeight = escStarBandHeight;
+    int bytesPerCol = escStarBytesPerColumn;
+    int widthBytes = (columns + 7) / 8;
+
+    // Convert column-major (MSB = top dot) to row-major raster (MSB = left dot),
+    // matching the layout expected by the raster renderer (isColumnFormat=false).
+    std::vector<unsigned char> raster(widthBytes * bandHeight, 0);
+    for (int col = 0; col < columns; ++col) {
+        for (int vB = 0; vB < bytesPerCol; ++vB) {
+            int srcIdx = col * bytesPerCol + vB;
+            if (srcIdx >= (int)escStarData.size()) break;
+            unsigned char byte = escStarData[srcIdx];
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((byte >> (7 - bit)) & 1) {
+                    int row = vB * 8 + bit;
+                    raster[row * widthBytes + (col / 8)] |= (1 << (7 - (col % 8)));
+                }
+            }
+        }
+    }
+
+    // Legacy apps build a tall image (e.g. a QR code) by emitting one band per
+    // line, each followed by a line feed. Merge a new band with the immediately
+    // preceding band (separated only by that single feed) so the image renders
+    // as one contiguous bitmap instead of being sliced by line spacing.
+    if (elements.size() >= 2 && elements.back().type == ELEMENT_NEWLINE) {
+        PrinterElement& prev = elements[elements.size() - 2];
+        if (prev.type == ELEMENT_BITMAP && prev.mergeableBand &&
+            !prev.isColumnFormat && prev.width == columns) {
+            elements.pop_back(); // drop the inter-band newline
+            prev.bitmapData.insert(prev.bitmapData.end(), raster.begin(),
+                                   raster.end());
+            prev.height += bandHeight;
+            return;
+        }
+    }
+
+    PrinterElement el;
+    el.type = ELEMENT_BITMAP;
+    el.bitmapData = raster;
+    el.width = columns;
+    el.height = bandHeight;
+    el.isColumnFormat = false; // already converted to raster above
+    el.mergeableBand = true;
+    el.align = currentAlign; // Justification active when the band began
     elements.push_back(el);
 }
 
@@ -200,13 +259,19 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
 
             case STATE_ESC:
                 if (b == 0x40) { // @ Initialize
+                    // Reset formatting modes only. On a real printer ESC @ does
+                    // NOT erase already-printed paper, so we must not clear
+                    // `elements` here: legacy jobs send ESC @ mid-stream (to
+                    // reset state before the footer) and clearing would wipe
+                    // earlier content such as a QR code. Display separation
+                    // between print jobs is handled at the connection level.
                     FlushSegment();
-                    elements.clear();
                     isRedMode = false;
                     isDoubleWidthMode = false;
                     isDoubleHeightMode = false;
                     isUnderlineMode = false;
                     currentLineSpacing = -1;
+                    currentAlign = 0; // Left
                     state = STATE_NORMAL;
                 }
                 else if (b == 0x45) { // E - Emphasized / Red
@@ -234,6 +299,20 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 }
                 else if (b == 0x21) { // ! - Select print mode
                     state = STATE_ESC_EXCLAMATION;
+                }
+                else if (b == 0x2A) { // * - Select bit image mode (legacy)
+                    state = STATE_ESC_STAR;
+                }
+                else if (b == 0x61) { // a - Select justification
+                    state = STATE_ESC_a;
+                }
+                else if (b == 0x69) { // i - Full cut
+                    AddCutLine();
+                    state = STATE_NORMAL;
+                }
+                else if (b == 0x6D) { // m - Partial cut
+                    AddCutLine();
+                    state = STATE_NORMAL;
                 }
                 else {
                     state = STATE_NORMAL;
@@ -276,12 +355,64 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 state = STATE_NORMAL;
                 break;
 
-            case STATE_ESC_3: 
+            case STATE_ESC_3:
                 // Set line spacing n
                 currentLineSpacing = b;
                 state = STATE_NORMAL;
                 break;
-            
+
+            case STATE_ESC_a:
+                // Select justification: n = 0/'0' left, 1/'1' center, 2/'2' right
+                if (b == 1 || b == 49) {
+                    currentAlign = 1; // Center
+                } else if (b == 2 || b == 50) {
+                    currentAlign = 2; // Right
+                } else {
+                    currentAlign = 0; // Left
+                }
+                state = STATE_NORMAL;
+                break;
+
+            // ESC * m nL nH d1...dk - Select bit image mode.
+            // Legacy applications emit graphics (e.g. QR codes) as a series of
+            // these bands instead of GS v 0 / GS *. Data is column-major.
+            case STATE_ESC_STAR:
+                escStarMode = b; // m
+                state = STATE_ESC_STAR_nL;
+                break;
+
+            case STATE_ESC_STAR_nL:
+                escStarColumns = b; // nL
+                state = STATE_ESC_STAR_nH;
+                break;
+
+            case STATE_ESC_STAR_nH:
+                escStarColumns += (b * 256); // + nH*256 = horizontal dots
+                // Vertical size depends on the mode:
+                //   m = 0, 1  -> 8-dot  density (1 byte per column)
+                //   m = 32,33 -> 24-dot density (3 bytes per column)
+                escStarBytesPerColumn =
+                    (escStarMode == 32 || escStarMode == 33) ? 3 : 1;
+                escStarBandHeight = escStarBytesPerColumn * 8;
+                escStarDataExpected = escStarColumns * escStarBytesPerColumn;
+                if (escStarDataExpected > 0) {
+                    FlushSegment(); // Flush text before graphics
+                    escStarData.clear();
+                    escStarData.reserve(escStarDataExpected);
+                    state = STATE_ESC_STAR_DATA;
+                } else {
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_ESC_STAR_DATA:
+                escStarData.push_back(b);
+                if ((int)escStarData.size() >= escStarDataExpected) {
+                    CommitEscStarBand();
+                    state = STATE_NORMAL;
+                }
+                break;
+
             case STATE_ESC_t:
                 // Consume n
                 currentCodePage = b;
@@ -412,6 +543,7 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     el.width = bitmapWidthBytes * 8; // Width in dots
                     el.height = bitmapHeightDots;
                     el.isColumnFormat = false; // Raster format (GS v 0)
+                    el.align = currentAlign;
                     elements.push_back(el);
                     
                     state = STATE_NORMAL;
@@ -439,7 +571,8 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     el.width = downloadedBitmapWidthBytes * 8;
                     el.height = downloadedBitmapHeightBytes * 8; // Yes, * 8. See GS * below.
                     el.isColumnFormat = true; // Column format (GS *)
-                    
+                    el.align = currentAlign;
+
                     elements.push_back(el);
                 }
                 
@@ -495,10 +628,11 @@ std::vector<PrinterElement> VirtualPrinter::GetElements() {
         PrinterElement el;
         el.type = ELEMENT_TEXT;
         el.text = currentText;
-        el.isRed = isRedMode; 
+        el.isRed = isRedMode;
         el.isDoubleWidth = isDoubleWidthMode;
         el.isDoubleHeight = isDoubleHeightMode;
         el.isUnderline = isUnderlineMode;
+        el.align = currentAlign;
         result.push_back(el);
     }
 

@@ -7,6 +7,8 @@
 
 @interface AppDelegate ()
 @property(strong, nonatomic) PrinterView *printerView;
+@property(strong, nonatomic) NSStatusItem *statusItem;
+@property(weak, nonatomic) NSMenuItem *alwaysOnTopItem;
 @end
 
 // Global instance to bridge C++ callback to ObjC
@@ -17,6 +19,7 @@ const size_t MAX_BUFFER_SIZE = 1024 * 1024; // 1MB Limit
 int g_port = 9100;
 int g_columns = 0;
 int g_fontSize = 16;
+bool g_alwaysOnTop = false;
 
 void RepaintCallback(void *param) {
   AppDelegate *delegate = (__bridge AppDelegate *)param;
@@ -69,6 +72,40 @@ void RepaintCallback(void *param) {
   [settingsMenu addItemWithTitle:@"Tamanho do texto..."
                           action:@selector(changeFontSize:)
                    keyEquivalent:@"f"];
+
+  NSMenuItem *alwaysOnTopItem =
+      [settingsMenu addItemWithTitle:@"Sempre no topo"
+                              action:@selector(toggleAlwaysOnTop:)
+                       keyEquivalent:@"t"];
+  [alwaysOnTopItem setState:g_alwaysOnTop ? NSControlStateValueOn
+                                          : NSControlStateValueOff];
+  self.alwaysOnTopItem = alwaysOnTopItem;
+
+  [settingsMenu addItem:[NSMenuItem separatorItem]];
+  [settingsMenu addItemWithTitle:@"Instalar Impressora Virtual"
+                          action:@selector(installVirtualPrinter:)
+                   keyEquivalent:@""];
+}
+
+- (void)setupStatusBar {
+  self.statusItem = [[NSStatusBar systemStatusBar]
+      statusItemWithLength:NSSquareStatusItemLength];
+  NSButton *button = self.statusItem.button;
+  NSImage *icon = [NSApp applicationIconImage];
+  icon = [icon copy];
+  [icon setSize:NSMakeSize(18, 18)];
+  button.image = icon;
+  button.toolTip = @"MAPENO Impressora Virtual ESC/POS";
+
+  NSMenu *menu = [[NSMenu alloc] init];
+  [menu addItemWithTitle:@"Restaurar"
+                  action:@selector(restoreWindow:)
+           keyEquivalent:@""];
+  [menu addItem:[NSMenuItem separatorItem]];
+  [menu addItemWithTitle:@"Sair"
+                  action:@selector(terminate:)
+           keyEquivalent:@""];
+  self.statusItem.menu = menu;
 }
 
 - (void)startServerWithPort:(int)port {
@@ -115,19 +152,17 @@ void RepaintCallback(void *param) {
 - (void)loadSettings {
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-  // Port
   if ([defaults objectForKey:@"Port"]) {
     g_port = (int)[defaults integerForKey:@"Port"];
   }
-
-  // Columns
   if ([defaults objectForKey:@"Columns"]) {
     g_columns = (int)[defaults integerForKey:@"Columns"];
   }
-
-  // Font Size
   if ([defaults objectForKey:@"FontSize"]) {
     g_fontSize = (int)[defaults integerForKey:@"FontSize"];
+  }
+  if ([defaults objectForKey:@"AlwaysOnTop"]) {
+    g_alwaysOnTop = [defaults boolForKey:@"AlwaysOnTop"];
   }
 }
 
@@ -136,8 +171,8 @@ void RepaintCallback(void *param) {
   [defaults setInteger:g_port forKey:@"Port"];
   [defaults setInteger:g_columns forKey:@"Columns"];
   [defaults setInteger:g_fontSize forKey:@"FontSize"];
+  [defaults setBool:g_alwaysOnTop forKey:@"AlwaysOnTop"];
 
-  // Window Frame
   if (self.window) {
     NSString *frameString = NSStringFromRect(self.window.frame);
     [defaults setObject:frameString forKey:@"WindowFrame"];
@@ -149,18 +184,11 @@ void RepaintCallback(void *param) {
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
   [self loadSettings];
 
-  // Window Setup
-  // Default frame
   NSRect frame = NSMakeRect(0, 0, 500, 700);
 
-  // Load saved frame
   NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
   if ([defaults objectForKey:@"WindowFrame"]) {
     frame = NSRectFromString([defaults stringForKey:@"WindowFrame"]);
-  } else {
-    // Center if new
-    // We'll center later if no saved frame, but let's just stick with default
-    // rect then center
   }
 
   NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -174,6 +202,12 @@ void RepaintCallback(void *param) {
       setTitle:[NSString
                    stringWithFormat:@"Impressora ESC/POS Virtual (Porto %d)",
                                     g_port]];
+  self.window.delegate = self;
+
+  // Apply always on top setting
+  if (g_alwaysOnTop) {
+    [self.window setLevel:NSFloatingWindowLevel];
+  }
 
   // View Setup
   NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:frame];
@@ -183,7 +217,7 @@ void RepaintCallback(void *param) {
 
   self.printerView = [[PrinterView alloc] initWithFrame:frame];
   [self.printerView setPrinter:&printer];
-  printer.SetMaxColumns(g_columns); // Apply loaded columns
+  printer.SetMaxColumns(g_columns);
 
   [scrollView setDocumentView:self.printerView];
   [self.window setContentView:scrollView];
@@ -198,8 +232,9 @@ void RepaintCallback(void *param) {
   // Setup Printer
   printer.SetRepaintCallback(RepaintCallback, (__bridge void *)self);
 
-  // Setup Menu
+  // Setup Menu and Status Bar
   [self setupMenu];
+  [self setupStatusBar];
 
   // Start Server
   [self startServerWithPort:g_port];
@@ -212,10 +247,54 @@ void RepaintCallback(void *param) {
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:
     (NSApplication *)sender {
-  return YES;
+  return NO; // Keep running with status bar icon when window is closed
+}
+
+// NSWindowDelegate - intercept minimize to hide to status bar instead of Dock
+- (BOOL)windowShouldMiniaturize:(NSWindow *)window {
+  [window orderOut:nil];
+  return NO;
 }
 
 // Actions
+
+- (void)restoreWindow:(id)sender {
+  [self.window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)toggleAlwaysOnTop:(id)sender {
+  g_alwaysOnTop = !g_alwaysOnTop;
+  self.alwaysOnTopItem.state =
+      g_alwaysOnTop ? NSControlStateValueOn : NSControlStateValueOff;
+  [self.window
+      setLevel:g_alwaysOnTop ? NSFloatingWindowLevel : NSNormalWindowLevel];
+  [self saveSettings];
+}
+
+- (void)installVirtualPrinter:(id)sender {
+  NSString *cmd = [NSString
+      stringWithFormat:
+          @"do shell script \"lpadmin -p VirtualESCPOS -E -v "
+          @"socket://127.0.0.1:%d -m raw\" with administrator privileges",
+          g_port];
+  NSAppleScript *script = [[NSAppleScript alloc] initWithSource:cmd];
+  NSDictionary *errInfo = nil;
+  [script executeAndReturnError:&errInfo];
+
+  NSAlert *alert = [[NSAlert alloc] init];
+  [alert setMessageText:@"Instalar Impressora Virtual"];
+  if (errInfo) {
+    NSString *errMsg = errInfo[NSAppleScriptErrorMessage] ?: @"Erro desconhecido.";
+    [alert setInformativeText:
+               [NSString stringWithFormat:@"Falha ao instalar a impressora.\n%@",
+                                          errMsg]];
+  } else {
+    [alert setInformativeText:
+               @"Impressora 'VirtualESCPOS' instalada com sucesso."];
+  }
+  [alert runModal];
+}
 
 - (void)changePort:(id)sender {
   NSAlert *alert = [[NSAlert alloc] init];

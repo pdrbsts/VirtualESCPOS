@@ -25,6 +25,8 @@ static const wchar_t* REG_VAL_WIN_MAX = L"WinMax";
 static const wchar_t* REG_VAL_FONTE = L"Fonte";
 static const wchar_t* REG_VAL_ALWAYSONTOP = L"AlwaysOnTop";
 
+static const wchar_t* STR_INSTALAR_IMPRESSORA = L"Instalar Impressora Virtual";
+
 #define WM_TRAYICON (WM_USER + 2)
 #define ID_TRAY_APP_ICON 1001
 #define IDM_RESTORE 1002
@@ -179,6 +181,8 @@ HMENU CreateMainMenu() {
     AppendMenu(hSubMenu, MF_STRING, IDM_FONTE, L"&Tamanho do texto...");
     AppendMenu(hSubMenu, MF_STRING | (g_alwaysOnTop ? MF_CHECKED : MF_UNCHECKED), IDM_ALWAYSONTOP, L"&Sempre no topo");
     AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hSubMenu, MF_STRING, IDM_INSTALAR_DRIVER, L"&Instalar Impressora Virtual");
+    AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hSubMenu, MF_STRING, IDM_LIMPAR, L"&Limpar");
     AppendMenu(hSubMenu, MF_STRING, IDM_SALVAR, L"Salvar");
     AppendMenu(hSubMenu, MF_STRING, IDM_SAIR, L"&Sair");
@@ -324,6 +328,40 @@ std::vector<unsigned char> ConvertToDIB(const std::vector<unsigned char>& src, i
     return dib;
 }
 
+// Returns the font to use for a text element, matching the draw path. If a
+// special font was created, sets *deleteFont so the caller can DeleteObject it.
+static HFONT SelectElementFont(const PrinterElement& el, int fontSize, HFONT hFontNormal, bool* deleteFont) {
+    *deleteFont = false;
+    if (!(el.isDoubleHeight || el.isDoubleWidth || el.isUnderline)) {
+        return hFontNormal;
+    }
+    int fnHeight = el.isDoubleHeight ? (fontSize * 2) : fontSize;
+    int fnWidth = el.isDoubleWidth ? (int)(fnHeight * 1.2) : 0;
+    *deleteFont = true;
+    return CreateFont(fnHeight, fnWidth, 0, 0, FW_NORMAL, FALSE, el.isUnderline, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Courier New");
+}
+
+// Total pixel width of the run of TEXT elements starting at startIdx, up to the
+// next line break (NEWLINE / CUT / BITMAP) or the end of the list. Used to
+// compute the horizontal offset for centered/right justification (ESC a).
+static int MeasureTextLineWidth(HDC hdc, const std::vector<PrinterElement>& elements, size_t startIdx, int fontSize, HFONT hFontNormal) {
+    int total = 0;
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+        if (elements[i].type != ELEMENT_TEXT) break;
+        bool del = false;
+        HFONT f = SelectElementFont(elements[i], fontSize, hFontNormal, &del);
+        HGDIOBJ old = SelectObject(hdc, f);
+        SIZE size;
+        GetTextExtentPoint32(hdc, elements[i].text.c_str(), (int)elements[i].text.length(), &size);
+        total += size.cx;
+        SelectObject(hdc, old);
+        if (del) DeleteObject(f);
+    }
+    return total;
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_SYSCOMMAND:
@@ -447,6 +485,67 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             
             SaveSettings();
+            return 0;
+        }
+        case IDM_INSTALAR_DRIVER:
+        {
+            wchar_t psPath[MAX_PATH];
+            if (SearchPath(NULL, L"powershell.exe", NULL, MAX_PATH, psPath, NULL) == 0) {
+                MessageBox(hwnd, L"PowerShell indisponivel neste sistema. A instalação automática do driver não pode prosseguir.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONERROR);
+                return 0;
+            }
+
+            const wchar_t* psCmd =
+                L"-NoProfile -ExecutionPolicy Bypass -Command \""
+                L"try {"
+                L"  $alreadyExists = [bool](Get-Printer -Name 'VirtualESCPOS' -ErrorAction SilentlyContinue);"
+                L"  if (-not (Get-PrinterDriver -Name 'Generic / Text Only' -ErrorAction SilentlyContinue)) {"
+                L"    Add-PrinterDriver -Name 'Generic / Text Only' -ErrorAction Stop"
+                L"  };"
+                L"  if (-not (Get-PrinterPort -Name 'VirtualESCPOS_Port' -ErrorAction SilentlyContinue)) {"
+                L"    Add-PrinterPort -Name 'VirtualESCPOS_Port' -PrinterHostAddress '127.0.0.1' -PortNumber 9100 -ErrorAction Stop"
+                L"  };"
+                L"  if (-not $alreadyExists) {"
+                L"    Add-Printer -Name 'VirtualESCPOS' -DriverName 'Generic / Text Only' -PortName 'VirtualESCPOS_Port' -ErrorAction Stop;"
+                L"    exit 0"
+                L"  } else {"
+                L"    exit 2"
+                L"  }"
+                L"} catch { exit 1 }\"";
+
+            SHELLEXECUTEINFO sei = { 0 };
+            sei.cbSize = sizeof(sei);
+            sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+            sei.hwnd = hwnd;
+            sei.lpVerb = L"runas";
+            sei.lpFile = L"powershell.exe";
+            sei.lpParameters = psCmd;
+            sei.nShow = SW_HIDE;
+
+            if (!ShellExecuteEx(&sei)) {
+                DWORD err = GetLastError();
+                if (err == ERROR_CANCELLED) {
+                    MessageBox(hwnd, L"Cancelado pelo utilizador.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONWARNING);
+                } else if (err == ERROR_FILE_NOT_FOUND) {
+                    MessageBox(hwnd, L"PowerShell indisponivel neste sistema.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONERROR);
+                } else {
+                    MessageBox(hwnd, L"Impossivel iniciar a instalação da impressora.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONERROR);
+                }
+                return 0;
+            }
+
+            WaitForSingleObject(sei.hProcess, INFINITE);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+
+            if (exitCode == 0) {
+                MessageBox(hwnd, L"Impressora 'VirtualESCPOS' instalada com sucesso.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONINFORMATION);
+            } else if (exitCode == 2) {
+                MessageBox(hwnd, L"A impressora 'VirtualESCPOS' já se encontra instalada.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBox(hwnd, L"Falha ao instalar a impressora. Verifique se tem privilegios de administrador e se o driver 'Generic / Text Only' está disponível.", STR_INSTALAR_IMPRESSORA, MB_OK | MB_ICONERROR);
+            }
             return 0;
         }
         case IDM_RESTORE:
@@ -584,8 +683,39 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         HPEN hPenCut = CreatePen(PS_DASH, 1, RGB(100, 100, 100));
         HGDIOBJ oldPen = SelectObject(hdc, hPenCut);
 
-        for (const auto& el : elements) {
+        // Reference width for justification (ESC a). When the user has set a
+        // fixed column count ("Colunas"), center/right within that paper width
+        // (columns * character width); otherwise fall back to the window width.
+        TEXTMETRIC tm;
+        GetTextMetrics(hdc, &tm); // hFontNormal is selected here
+        int charWidth = tm.tmAveCharWidth;
+        int paperWidth = (g_colunas > 0) ? g_colunas * charWidth : 0;
+
+        auto alignStartX = [&](int contentWidth, int align) -> int {
+            int startX = leftMargin;
+            if (paperWidth > 0) {
+                if (align == 1) startX = leftMargin + (paperWidth - contentWidth) / 2;
+                else if (align == 2) startX = leftMargin + paperWidth - contentWidth;
+            } else {
+                if (align == 1) startX = (rect.right - contentWidth) / 2;
+                else if (align == 2) startX = rect.right - contentWidth - leftMargin;
+            }
+            if (startX < leftMargin) startX = leftMargin;
+            return startX;
+        };
+
+        bool atLineStart = true;
+        for (size_t idx = 0; idx < elements.size(); ++idx) {
+            const PrinterElement& el = elements[idx];
             if (el.type == ELEMENT_TEXT) {
+                // At the first text segment of a line, offset the start position
+                // for center/right justification based on the whole line width.
+                if (atLineStart) {
+                    int lineWidth = MeasureTextLineWidth(hdc, elements, idx, g_fontSize, hFontNormal);
+                    currentX = alignStartX(lineWidth, el.align);
+                    atLineStart = false;
+                }
+
                 // Determine font properties
                 int fnHeight = el.isDoubleHeight ? (g_fontSize * 2) : g_fontSize;
                 int fnWidth = 0;
@@ -642,6 +772,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             else if (el.type == ELEMENT_NEWLINE) {
                 currentX = leftMargin;
+                atLineStart = true;
                 // Add vertical spacing
                 // Use explicit spacing if set (el.height).
                 if (el.height > 0) {
@@ -668,6 +799,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 TextOut(hdc, rect.right - 50, y - 8, L"[CUT]", 5);
                 y += 10;
                 y += g_fontSize + 4; // Advance paper a bit after cut (default line height)
+                atLineStart = true;
             }
             else if (el.type == ELEMENT_BITMAP) {
                 if (currentX != leftMargin) {
@@ -675,6 +807,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     y += currentLineMaxHeight + 4;
                     currentLineMaxHeight = g_fontSize + 4;
                 }
+                atLineStart = true;
 
                 int w = el.width; // dots
                 int h = el.height; // dots
@@ -711,8 +844,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 // Convert data to padded DIB format
                 std::vector<unsigned char> dibData = ConvertToDIB(actualData, wBytes, h);
 
-                SetDIBitsToDevice(hdc, currentX, y, w, h, 
-                    0, 0, 0, h, 
+                // Apply justification (ESC a): center/right within the paper width
+                int drawX = alignStartX(w, el.align);
+
+                SetDIBitsToDevice(hdc, drawX, y, w, h,
+                    0, 0, 0, h,
                     dibData.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS);
 
                 y += h;
