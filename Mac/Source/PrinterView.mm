@@ -58,6 +58,58 @@
   CGFloat charWidth = [@"0" sizeWithAttributes:attrsNormal].width;
   CGFloat paperWidth = (g_columns > 0) ? g_columns * charWidth : 0;
 
+  // Glyph height of each ESC/POS font relative to the configured base size:
+  // Font A is 12x24, Font B 9x17 and Font C smaller still (ESC M n).
+  auto fontHeightFactor = [](int font) -> CGFloat {
+    if (font == FONT_B)
+      return 17.0 / 24.0;
+    if (font == FONT_C)
+      return 16.0 / 24.0;
+    return 1.0;
+  };
+
+  auto fontForElement = [&](int font) -> NSFont * {
+    if (font == FONT_A)
+      return fontNormal;
+    CGFloat size = g_fontSize * fontHeightFactor(font);
+    NSFont *f = [NSFont fontWithName:@"Courier New" size:size];
+    return f ? f : [NSFont userFixedPitchFontOfSize:size];
+  };
+
+  // ESC/POS horizontal coordinates are in dots; text is laid out on a
+  // character grid, so dots map through the Font A cell width.
+  auto dotsToPoints = [&](int dots) -> CGFloat {
+    return dots * charWidth / (CGFloat)DOTS_PER_CHAR;
+  };
+
+  auto attrsForElement = [&](const PrinterElement &e) -> NSMutableDictionary * {
+    NSMutableDictionary *a = [NSMutableDictionary dictionary];
+    NSFont *f = fontForElement(e.font);
+    if (e.isBold) {
+      // ESC G double-strike shows up as bold.
+      NSFont *boldFont = [[NSFontManager sharedFontManager] convertFont:f
+                                                           toHaveTrait:NSBoldFontMask];
+      if (boldFont)
+        f = boldFont;
+    }
+    a[NSFontAttributeName] = f;
+    // GS B knocks the glyphs out in white over an inked cell.
+    a[NSForegroundColorAttributeName] =
+        e.isReverse ? [NSColor whiteColor]
+                    : (e.isRed ? [NSColor redColor] : [NSColor blackColor]);
+    if (e.isUnderline)
+      a[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle);
+    if (e.charSpacing > 0)
+      a[NSKernAttributeName] = @(dotsToPoints(e.charSpacing)); // ESC SP
+    return a;
+  };
+
+  auto stringForElement = [](const PrinterElement &e) -> NSString * {
+    return [[NSString alloc] initWithBytes:e.text.data()
+                                    length:e.text.size() * sizeof(wchar_t)
+                                  encoding:NSUTF32LittleEndianStringEncoding];
+  };
+
   // Total drawn width of the run of TEXT elements starting at startIdx, up to
   // the next line break (NEWLINE / CUT / BITMAP) or the end of the list.
   auto measureLineWidth = [&](size_t startIdx) -> CGFloat {
@@ -66,31 +118,117 @@
       const auto &e = elements[i];
       if (e.type != ELEMENT_TEXT)
         break;
-      NSString *t =
-          [[NSString alloc] initWithBytes:e.text.data()
-                                   length:e.text.size() * sizeof(wchar_t)
-                                 encoding:NSUTF32LittleEndianStringEncoding];
-      CGFloat w0 = [t sizeWithAttributes:attrsNormal].width;
-      total += w0 * (e.isDoubleWidth ? 2.0 : 1.0);
+      NSString *t = stringForElement(e);
+      NSSize sz = [t sizeWithAttributes:attrsForElement(e)];
+      if (e.isRotated90)
+        total += sz.height * e.heightScale * (CGFloat)t.length;
+      else
+        total += sz.width * e.widthScale;
     }
     return total;
   };
 
-  auto alignStartX = [&](CGFloat contentWidth, int align) -> CGFloat {
-    CGFloat startX = leftMargin;
-    if (paperWidth > 0) {
-      if (align == 1)
-        startX = leftMargin + (paperWidth - contentWidth) / 2.0;
-      else if (align == 2)
-        startX = leftMargin + paperWidth - contentWidth;
-    } else {
-      if (align == 1)
-        startX = (width - contentWidth) / 2.0;
-      else if (align == 2)
-        startX = width - contentWidth - leftMargin;
+  // Tallest element in the same run, used to rotate upside-down lines.
+  auto measureLineHeight = [&](size_t startIdx) -> CGFloat {
+    CGFloat maxHeight = 0;
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+      const auto &e = elements[i];
+      if (e.type != ELEMENT_TEXT)
+        break;
+      NSString *t = stringForElement(e);
+      CGFloat h = [t sizeWithAttributes:attrsForElement(e)].height * e.heightScale;
+      if (h > maxHeight)
+        maxHeight = h;
     }
-    if (startX < leftMargin)
-      startX = leftMargin;
+    return maxHeight;
+  };
+
+  auto lineHasUpsideDown = [&](size_t startIdx) -> bool {
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+      const auto &e = elements[i];
+      if (e.type != ELEMENT_TEXT)
+        break;
+      if (e.isUpsideDown)
+        return true;
+    }
+    return false;
+  };
+
+  // Draws one text segment at (x, y0) and reports the space it took up.
+  auto drawSegment = [&](const PrinterElement &e, CGFloat x,
+                         CGFloat y0) -> NSSize {
+    NSMutableDictionary *attrs = attrsForElement(e);
+    NSString *text = stringForElement(e);
+    NSSize base = [text sizeWithAttributes:attrs];
+    NSSize drawn =
+        NSMakeSize(base.width * e.widthScale, base.height * e.heightScale);
+
+    // ESC V turns each glyph 90 degrees clockwise while the line still runs
+    // left to right, so the run occupies one glyph height per character.
+    if (e.isRotated90) {
+      CGFloat cell = base.height * e.heightScale;
+      drawn = NSMakeSize(cell * (CGFloat)text.length, cell);
+    }
+
+    if (e.isReverse) {
+      NSColor *ink = e.isRed ? [NSColor redColor] : [NSColor blackColor];
+      [ink setFill];
+      NSRectFill(NSMakeRect(x, y0, drawn.width, drawn.height));
+    }
+
+    if (e.isRotated90) {
+      CGFloat cell = base.height * e.heightScale;
+      CGFloat penX = x;
+      for (NSUInteger i = 0; i < text.length; ++i) {
+        NSString *glyph = [text substringWithRange:NSMakeRange(i, 1)];
+        CGContextSaveGState(context);
+        // Rotate about the glyph's own cell: in this flipped view a positive
+        // angle turns clockwise on screen.
+        CGContextTranslateCTM(context, penX + cell, y0);
+        CGContextRotateCTM(context, M_PI_2);
+        CGContextScaleCTM(context, e.widthScale, e.heightScale);
+        [glyph drawAtPoint:NSMakePoint(0, 0) withAttributes:attrs];
+        CGContextRestoreGState(context);
+        penX += cell;
+      }
+      return drawn;
+    }
+
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context, x, y0);
+    CGContextScaleCTM(context, e.widthScale, e.heightScale);
+    [text drawAtPoint:NSMakePoint(0, 0) withAttributes:attrs];
+    CGContextRestoreGState(context);
+
+    return drawn;
+  };
+
+  // Left edge of the printable area for an element, honouring GS L.
+  auto elementBaseX = [&](const PrinterElement &e) -> CGFloat {
+    return leftMargin + dotsToPoints(e.marginLeft);
+  };
+
+  // Width of the printable area: GS W if set, else the configured paper width,
+  // else whatever the view gives us.
+  auto elementAreaWidth = [&](const PrinterElement &e) -> CGFloat {
+    if (e.areaWidth > 0)
+      return dotsToPoints(e.areaWidth);
+    if (paperWidth > 0)
+      return paperWidth;
+    return width - elementBaseX(e) - leftMargin;
+  };
+
+  auto alignStartX = [&](CGFloat contentWidth,
+                         const PrinterElement &e) -> CGFloat {
+    CGFloat base = elementBaseX(e);
+    CGFloat areaW = elementAreaWidth(e);
+    CGFloat startX = base;
+    if (e.align == 1)
+      startX = base + (areaW - contentWidth) / 2.0;
+    else if (e.align == 2)
+      startX = base + areaW - contentWidth;
+    if (startX < base)
+      startX = base;
     return startX;
   };
 
@@ -101,48 +239,56 @@
       // At the first text segment of a line, offset the start position for
       // center/right justification based on the whole line width.
       if (atLineStart) {
-        currentX = alignStartX(measureLineWidth(idx), el.align);
+        CGFloat lineWidth = measureLineWidth(idx);
+        currentX = alignStartX(lineWidth, el);
         atLineStart = false;
+
+        // ESC {: the printer turns the whole line 180 degrees. Flipping both
+        // axes for the whole line (rather than per segment) is what puts the
+        // segments back in the order a real printer produces.
+        CGFloat lineHeight = measureLineHeight(idx);
+        if (lineHasUpsideDown(idx) && lineWidth > 0 && lineHeight > 0) {
+          CGContextSaveGState(context);
+          CGContextTranslateCTM(context, currentX + lineWidth, y + lineHeight);
+          CGContextScaleCTM(context, -1.0, -1.0);
+
+          CGFloat offsetX = 0;
+          size_t j = idx;
+          for (; j < elements.size() && elements[j].type == ELEMENT_TEXT; ++j) {
+            offsetX += drawSegment(elements[j], offsetX, 0).width;
+          }
+
+          CGContextRestoreGState(context);
+
+          if (lineHeight > currentLineMaxHeight) {
+            currentLineMaxHeight = lineHeight;
+          }
+          currentX += lineWidth;
+          idx = j - 1; // the loop's ++idx steps past the whole run
+          continue;
+        }
       }
-      // Font selection logic - always use normal font, scale using CTM
-      NSFont *fontToUse = fontNormal;
 
-      NSMutableDictionary *attrs =
-          [NSMutableDictionary dictionaryWithDictionary:attrsNormal];
-      attrs[NSFontAttributeName] = fontToUse;
-      if (el.isRed) {
-        attrs[NSForegroundColorAttributeName] = [NSColor redColor];
+      NSSize drawn = drawSegment(el, currentX, y);
+      if (drawn.height > currentLineMaxHeight) {
+        currentLineMaxHeight = drawn.height;
       }
-      if (el.isUnderline) {
-        attrs[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle);
-      }
-
-      NSString *text =
-          [[NSString alloc] initWithBytes:el.text.data()
-                                   length:el.text.size() * sizeof(wchar_t)
-                                 encoding:NSUTF32LittleEndianStringEncoding];
-
-      NSSize originalSize = [text sizeWithAttributes:attrs];
-
-      CGFloat scaleX = el.isDoubleWidth ? 2.0 : 1.0;
-      CGFloat scaleY = el.isDoubleHeight ? 2.0 : 1.0;
-
-      CGContextSaveGState(context);
-      CGContextTranslateCTM(context, currentX, y);
-      CGContextScaleCTM(context, scaleX, scaleY);
-
-      [text drawAtPoint:NSMakePoint(0, 0) withAttributes:attrs];
-
-      CGContextRestoreGState(context);
-
-      // Update metrics
-      CGFloat drawnWidth = originalSize.width * scaleX;
-      CGFloat drawnHeight = originalSize.height * scaleY;
-
-      if (drawnHeight > currentLineMaxHeight) {
-        currentLineMaxHeight = drawnHeight;
-      }
-      currentX += drawnWidth;
+      currentX += drawn.width;
+    } else if (el.type == ELEMENT_SETPOS) {
+      // ESC $ / ESC \: an explicit position replaces the justified start.
+      CGFloat base = elementBaseX(el);
+      currentX = el.absolutePos ? base + dotsToPoints(el.width)
+                                : currentX + dotsToPoints(el.width);
+      if (currentX < base)
+        currentX = base;
+      atLineStart = false;
+    } else if (el.type == ELEMENT_FEED) {
+      // ESC J / ESC K: vertical dots map 1:1 to points, matching how ESC 3
+      // line spacing is already handled.
+      y += el.height;
+      currentX = elementBaseX(el);
+      atLineStart = true;
+      currentLineMaxHeight = g_fontSize + 4;
     } else if (el.type == ELEMENT_NEWLINE) {
       currentX = leftMargin;
       atLineStart = true;
@@ -277,7 +423,7 @@
         CGContextSaveGState(context);
 
         // Apply justification (ESC a): center/right within the paper width
-        CGFloat drawX = alignStartX(el.width, el.align);
+        CGFloat drawX = alignStartX(el.width, el);
 
         // Flip context for image drawing
         CGContextTranslateCTM(context, 0, y + el.height);

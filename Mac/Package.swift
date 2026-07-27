@@ -16,6 +16,9 @@ let package = Package(
             sources: [
                 "Network.cpp",
                 "VirtualPrinter.cpp",
+                "Barcode.cpp",
+                "CodePages.cpp",
+                "QRCode.cpp",
                 "Source/main.m",
                 "Source/AppDelegate.mm", // Boxed C++ 
                 "Source/PrinterView.mm"

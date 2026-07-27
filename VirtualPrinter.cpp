@@ -1,71 +1,92 @@
 #include "VirtualPrinter.h"
+#include "Barcode.h"
+#include "CodePages.h"
+#include "QRCode.h"
 #include <iostream>
 
 #include <string>
 
-// Helper for Code Page mapping (Minimal implementation)
-// PC437 (Standard) - partial map for common chars
-static const wchar_t CP437_Map[128] = {
-    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7, // 80-87: Ç ü é â ä à å ç
-    0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5, // 88-8F: ê ë è ï î ì Ä Å
-    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9, // 90-97: É æ Æ ô ö ò û ù
-    0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192, // 98-9F: ÿ Ö Ü ¢ £ ¥ ₧ ƒ
-    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA, // A0-A7: á í ó ú ñ Ñ ª º
-    0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB, // A8-AF: ¿ ⌐ ¬ ½ ¼ ¡ « »
-    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, // B0-B7: ░ ▒ ▓ │ ┤ ╡ ╢ ╖
-    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510, // B8-BF: ╕ ╣ ║ ╗ ╝ ╜ ╛ ┐
-    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F, // C0-C7: └ ┴ ┬ ├ ─ ┼ ╞ ╟
-    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567, // C8-CF: ╚ ╔ ╩ ╦ ╠ ═ ╬ ╧
-    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B, // D0-D7: ╨ ╤ ╥ ╙ ╘ ╒ ╒ ╫
-    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580, // D8-DF: ╪ ┘ ┌ █ ▄ ▌ ▐ ▀
-    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4, // E0-E7: α ß Γ π Σ σ µ τ
-    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229, // E8-EF: Φ Θ Ω δ ∞ φ ε ∩
-    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248, // F0-F7: ≡ ± ≥ ≤ ⌠ ⌡ ÷ ≈
-    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0  // F8-FF: ° ∙ · √ ⁿ ² ■ NB
+// ---------------------------------------------------------------------------
+// Commands that are recognised but not rendered.
+//
+// These still have to consume their parameters: the parser returns to
+// STATE_NORMAL after the command byte, so any parameter left behind is treated
+// as printable text and shows up as garbage on the paper. Each entry is the
+// command byte followed by its fixed parameter count.
+// ---------------------------------------------------------------------------
+struct CmdParams {
+    unsigned char cmd;
+    int params;
 };
 
-// PC860 (Portuguese) Map
-static const wchar_t CP860_Map[128] = {
-    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E3, 0x00E0, 0x00C1, 0x00E7, // 80-87: Ç ü é â ã à Á ç
-    0x00EA, 0x00CA, 0x00E8, 0x00CD, 0x00D4, 0x00EC, 0x00C3, 0x00C2, // 88-8F: ê Ê è Í Ô ì Ã Â
-    0x00C9, 0x00C0, 0x00C8, 0x00F4, 0x00F5, 0x00F2, 0x00DA, 0x00F9, // 90-97: É À È ô õ ò Ú ù
-    0x00CC, 0x00D5, 0x00DC, 0x00A2, 0x00A3, 0x00D9, 0x20A7, 0x00D3, // 98-9F: Ì Õ Ü ¢ £ Ù ₧ Ó
-    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA, // A0-A7: á í ó ú ñ Ñ ª º
-    0x00BF, 0x00D2, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB, // A8-AF: ¿ Ò ¬ ½ ¼ ¡ « »
-    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, // B0-B7: ░ ▒ ▓ │ ┤ ╡ ╢ ╖
-    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510, // B8-BF: ╕ ╣ ║ ╗ ╝ ╜ ╛ ┐
-    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F, // C0-C7: └ ┴ ┬ ├ ─ ┼ ╞ ╟
-    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567, // C8-CF: ╚ ╔ ╩ ╦ ╠ ═ ╬ ╧
-    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B, // D0-D7: ╨ ╤ ╥ ╙ ╘ ╒ ╒ ╫
-    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580, // D8-DF: ╪ ┘ ┌ █ ▄ ▌ ▐ ▀
-    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4, // E0-E7: α ß Γ π Σ σ µ τ
-    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229, // E8-EF: Φ Θ Ω δ ∞ φ ε ∩
-    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248, // F0-F7: ≡ ± ≥ ≤ ⌠ ⌡ ÷ ≈
-    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0  // F8-FF: ° ∙ · √ ⁿ ² ■ NB
+static const CmdParams ESC_SKIP[] = {
+    {0x0C, 0}, // ESC FF   - print data in page mode
+    {0x25, 1}, // ESC % n  - select/cancel user-defined character set
+    {0x34, 0}, // ESC 4    - select italic (non-Epson) / user char set
+    {0x35, 0}, // ESC 5    - cancel italic
+    {0x3D, 1}, // ESC = n  - select peripheral device
+    {0x3F, 1}, // ESC ? n  - cancel user-defined character
+    {0x4C, 0}, // ESC L    - select page mode
+    {0x52, 1}, // ESC R n  - select international character set
+    {0x53, 0}, // ESC S    - select standard mode
+    {0x54, 1}, // ESC T n  - select print direction in page mode
+    {0x57, 8}, // ESC W ...- set print area in page mode
+    {0x70, 3}, // ESC p m t1 t2 - generate cash drawer pulse
+    {0x75, 1}, // ESC u n  - transmit peripheral device status
+    {0x76, 0}, // ESC v    - transmit paper sensor status
 };
 
-wchar_t MapChar(unsigned char c, int codePage) {
-    if (c < 0x80) return (wchar_t)c;
-    int idx = c - 0x80;
-    
-    // PC860
-    if (codePage == 3) {
-        return CP860_Map[idx];
+static const CmdParams GS_SKIP[] = {
+    {0x24, 2}, // GS $ nL nH - absolute vertical position in page mode
+    {0x3A, 0}, // GS :     - start/end macro definition
+    {0x49, 1}, // GS I n   - transmit printer ID
+    {0x50, 2}, // GS P x y - set motion units
+    {0x54, 1}, // GS T n   - move to beginning of print line
+    {0x5C, 2}, // GS \ nL nH - relative vertical position in page mode
+    {0x5E, 3}, // GS ^ r t m - execute macro
+    {0x61, 1}, // GS a n   - enable/disable automatic status back
+    {0x62, 1}, // GS b n   - turn smoothing on/off
+    {0x6A, 1}, // GS j n   - enable/disable ASB for ink
+    {0x72, 1}, // GS r n   - transmit status
+};
+
+static const CmdParams FS_SKIP[] = {
+    {0x21, 1}, // FS ! n   - set print mode for Kanji
+    {0x26, 0}, // FS &     - select Kanji mode
+    {0x2D, 1}, // FS - n   - underline mode for Kanji
+    {0x2E, 0}, // FS .     - cancel Kanji mode
+    {0x43, 1}, // FS C n   - select Kanji code system
+    {0x53, 2}, // FS S n1 n2 - set Kanji character spacing
+    {0x57, 1}, // FS W n   - Kanji quadruple size
+};
+
+// Upper bound on a single stored image. A malformed stream can claim a huge
+// length; past this we consume the bytes without buffering them.
+static const long long MAX_IMAGE_BYTES = 8LL * 1024 * 1024;
+
+static int LookupParams(const CmdParams *table, size_t count, unsigned char cmd) {
+    for (size_t i = 0; i < count; ++i) {
+        if (table[i].cmd == cmd) return table[i].params;
     }
-    
-    // Default PC437
-    // Also PC850? Not implemented fully, fallback to 437 usually works for many signs except accents.
-    // For now, default to PC437.
-    return CP437_Map[idx];
+    return -1; // not in the table
 }
 
 VirtualPrinter::VirtualPrinter() {
     state = STATE_NORMAL;
     repaintCallback = nullptr;
     repaintParam = nullptr;
-    isRedMode = false;
-    isDoubleWidthMode = false;
-    isDoubleHeightMode = false;
+    isEmphasizedMode = false;
+    isColorRedMode = false;
+    widthScaleMode = 1;
+    heightScaleMode = 1;
+    isReverseMode = false;
+    isUpsideDownMode = false;
+    isBoldMode = false;
+    isRotated90Mode = false;
+    charSpacingDots = 0;
+    marginLeftDots = 0;
+    areaWidthDots = 0;
+    currentFont = FONT_A;
     isUnderlineMode = false;
     currentLineSpacing = -1; // Auto
     downloadedBitmapWidthBytes = 0;
@@ -81,6 +102,28 @@ VirtualPrinter::VirtualPrinter() {
     escStarBytesPerColumn = 0;
     escStarBandHeight = 0;
     escStarDataExpected = 0;
+    skipRemaining = 0;
+    skipReturnState = STATE_NORMAL;
+    lenBytesRemaining = 0;
+    lenShift = 0;
+    pendingLen = 0;
+    userCharY = 0;
+    userCharRemaining = 0;
+    nvImagesRemaining = 0;
+    nvHeaderIndex = 0;
+    nvHeader[0] = nvHeader[1] = nvHeader[2] = nvHeader[3] = 0;
+    nvExpected = 0;
+    nvImageIndex = 0;
+    barcodeType = -1;
+    barcodeHeight = 162; // ESC/POS default
+    barcodeModule = 3;   // ESC/POS default
+    barcodeHriPos = 0;   // not printed
+    barcodeHriFont = 0;
+    barcodeExpected = 0;
+    parenId = 0;
+    parenExpected = 0;
+    qrModuleSize = 3;
+    qrEcLevel = QR_ECC_LOW;
 }
 
 VirtualPrinter::~VirtualPrinter() {
@@ -91,9 +134,18 @@ void VirtualPrinter::Reset() {
     std::lock_guard<std::mutex> lock(mutex);
     elements.clear();
     state = STATE_NORMAL;
-    isRedMode = false;
-    isDoubleWidthMode = false;
-    isDoubleHeightMode = false;
+    isEmphasizedMode = false;
+    isColorRedMode = false;
+    widthScaleMode = 1;
+    heightScaleMode = 1;
+    isReverseMode = false;
+    isUpsideDownMode = false;
+    isBoldMode = false;
+    isRotated90Mode = false;
+    charSpacingDots = 0;
+    marginLeftDots = 0;
+    areaWidthDots = 0;
+    currentFont = FONT_A;
     isUnderlineMode = false;
     currentLineSpacing = -1; // Auto
     // Do NOT clear downloaded bitmap on Reset? 
@@ -103,6 +155,15 @@ void VirtualPrinter::Reset() {
     currentText = L"";
     currentAlign = 0; // Left
     currentColumn = 0;
+    tabStops.clear();
+    barcodeHeight = 162;
+    barcodeModule = 3;
+    barcodeHriPos = 0;
+    barcodeHriFont = 0;
+    barcodeData.clear();
+    qrModuleSize = 3;
+    qrEcLevel = QR_ECC_LOW;
+    qrStoredData.clear();
     if (repaintCallback) repaintCallback(repaintParam);
 }
 
@@ -110,9 +171,18 @@ void VirtualPrinter::Clear() {
     std::lock_guard<std::mutex> lock(mutex);
     elements.clear();
     state = STATE_NORMAL;
-    isRedMode = false;
-    isDoubleWidthMode = false;
-    isDoubleHeightMode = false;
+    isEmphasizedMode = false;
+    isColorRedMode = false;
+    widthScaleMode = 1;
+    heightScaleMode = 1;
+    isReverseMode = false;
+    isUpsideDownMode = false;
+    isBoldMode = false;
+    isRotated90Mode = false;
+    charSpacingDots = 0;
+    marginLeftDots = 0;
+    areaWidthDots = 0;
+    currentFont = FONT_A;
     isUnderlineMode = false;
     currentLineSpacing = -1; // Auto
     
@@ -121,12 +191,41 @@ void VirtualPrinter::Clear() {
     downloadedBitmapWidthBytes = 0;
     downloadedBitmapHeightBytes = 0;
     downloadedBitmapExpected = 0;
+    nvImages.clear();
+    nvBuffer.clear();
+    graphicsBuffer = StoredImage();
 
     currentCodePage = 0; // Default PC437
     currentText = L"";
     currentAlign = 0; // Left
     currentColumn = 0;
+    tabStops.clear();
+    barcodeHeight = 162;
+    barcodeModule = 3;
+    barcodeHriPos = 0;
+    barcodeHriFont = 0;
+    barcodeData.clear();
+    qrModuleSize = 3;
+    qrEcLevel = QR_ECC_LOW;
+    qrStoredData.clear();
     if (repaintCallback) repaintCallback(repaintParam);
+}
+
+void VirtualPrinter::ApplyStyle(PrinterElement &el) {
+    // ESC E (emphasized) and ESC r (colour) both render red here.
+    el.isRed = isEmphasizedMode || isColorRedMode;
+    el.widthScale = widthScaleMode;
+    el.heightScale = heightScaleMode;
+    el.isReverse = isReverseMode;
+    el.isUpsideDown = isUpsideDownMode;
+    el.isBold = isBoldMode;
+    el.isRotated90 = isRotated90Mode;
+    el.charSpacing = charSpacingDots;
+    el.marginLeft = marginLeftDots;
+    el.areaWidth = areaWidthDots;
+    el.font = currentFont;
+    el.isUnderline = isUnderlineMode;
+    el.align = currentAlign;
 }
 
 void VirtualPrinter::FlushSegment() {
@@ -134,14 +233,30 @@ void VirtualPrinter::FlushSegment() {
         PrinterElement el;
         el.type = ELEMENT_TEXT;
         el.text = currentText;
-        el.isRed = isRedMode;
-        el.isDoubleWidth = isDoubleWidthMode;
-        el.isDoubleHeight = isDoubleHeightMode;
-        el.isUnderline = isUnderlineMode;
-        el.align = currentAlign;
+        ApplyStyle(el);
         elements.push_back(el);
         currentText = L"";
     }
+}
+
+void VirtualPrinter::AddSetPos(int dots, bool absolute) {
+    FlushSegment();
+    PrinterElement el;
+    el.type = ELEMENT_SETPOS;
+    ApplyStyle(el);
+    el.width = dots;
+    el.absolutePos = absolute;
+    elements.push_back(el);
+}
+
+void VirtualPrinter::AddFeed(int dots) {
+    FlushSegment();
+    PrinterElement el;
+    el.type = ELEMENT_FEED;
+    ApplyStyle(el);
+    el.height = dots;
+    elements.push_back(el);
+    currentColumn = 0;
 }
 
 void VirtualPrinter::AddNewLine() {
@@ -215,6 +330,300 @@ void VirtualPrinter::CommitEscStarBand() {
     elements.push_back(el);
 }
 
+void VirtualPrinter::CommitBarcode() {
+    FlushSegment();
+
+    std::vector<bool> dots;
+    std::string hri;
+    if (!EncodeBarcode(barcodeType, barcodeData, barcodeModule, dots, hri) ||
+        dots.empty()) {
+        // Real printers print nothing when the data does not fit the
+        // symbology, so neither do we.
+        barcodeData.clear();
+        return;
+    }
+
+    // Build a raster bitmap (row-major, MSB = leftmost dot) whose rows are all
+    // the same bar pattern; that is the layout the renderer already expects for
+    // GS v 0 style bitmaps.
+    int width = (int)dots.size();
+    int height = (barcodeHeight > 0) ? barcodeHeight : 162;
+    int widthBytes = (width + 7) / 8;
+
+    std::vector<unsigned char> row(widthBytes, 0);
+    for (int x = 0; x < width; ++x) {
+        if (dots[x]) row[x / 8] |= (unsigned char)(1 << (7 - (x % 8)));
+    }
+
+    std::vector<unsigned char> raster;
+    raster.reserve((size_t)widthBytes * height);
+    for (int y = 0; y < height; ++y) {
+        raster.insert(raster.end(), row.begin(), row.end());
+    }
+
+    // HRI above the bars (GS H n = 1 or 3).
+    bool hriAbove = (barcodeHriPos == 1 || barcodeHriPos == 3);
+    bool hriBelow = (barcodeHriPos == 2 || barcodeHriPos == 3);
+
+    if (hriAbove && !hri.empty()) {
+        currentText.assign(hri.begin(), hri.end());
+        FlushSegment();
+        AddNewLine();
+    }
+
+    PrinterElement el;
+    el.type = ELEMENT_BITMAP;
+    el.bitmapData = raster;
+    el.width = width;
+    el.height = height;
+    el.isColumnFormat = false;
+    el.align = currentAlign;
+    elements.push_back(el);
+
+    if (hriBelow && !hri.empty()) {
+        currentText.assign(hri.begin(), hri.end());
+        FlushSegment();
+        AddNewLine();
+    }
+
+    barcodeData.clear();
+}
+
+void VirtualPrinter::AddBitmapElement(const std::vector<unsigned char> &raster,
+                                      int widthDots, int heightDots) {
+    if (raster.empty() || widthDots <= 0 || heightDots <= 0) return;
+    FlushSegment();
+    PrinterElement el;
+    el.type = ELEMENT_BITMAP;
+    ApplyStyle(el);
+    el.bitmapData = raster;
+    el.width = widthDots;
+    el.height = heightDots;
+    el.isColumnFormat = false;
+    elements.push_back(el);
+}
+
+void VirtualPrinter::CommitQRCode() {
+    std::vector<std::vector<bool> > matrix;
+    if (!EncodeQRCode(qrStoredData, qrEcLevel, matrix) || matrix.empty()) {
+        // Too much data for even a version 40 symbol: a real printer prints
+        // nothing rather than a partial code.
+        return;
+    }
+
+    int modules = (int)matrix.size();
+    int scale = qrModuleSize > 0 ? qrModuleSize : 3;
+    // A quiet zone of 4 modules is part of the symbol; without it scanners
+    // that see the bare matrix against neighbouring text often fail.
+    const int quiet = 4;
+    int sizeModules = modules + quiet * 2;
+    int widthDots = sizeModules * scale;
+    int widthBytes = (widthDots + 7) / 8;
+
+    std::vector<unsigned char> raster((size_t)widthBytes * widthDots, 0);
+    for (int my = 0; my < modules; ++my) {
+        for (int mx = 0; mx < modules; ++mx) {
+            if (!matrix[my][mx]) continue;
+            for (int dy = 0; dy < scale; ++dy) {
+                int py = (my + quiet) * scale + dy;
+                unsigned char *row = &raster[(size_t)py * widthBytes];
+                for (int dx = 0; dx < scale; ++dx) {
+                    int px = (mx + quiet) * scale + dx;
+                    row[px / 8] |= (unsigned char)(1 << (7 - (px % 8)));
+                }
+            }
+        }
+    }
+
+    AddBitmapElement(raster, widthDots, widthDots);
+}
+
+void VirtualPrinter::Handle2DCodeCommand() {
+    // GS ( k pL pH cn fn [parameters], with cn = 49 for QR Code.
+    if (parenData.size() < 2) return;
+    int cn = parenData[0];
+    int fn = parenData[1];
+    if (cn != 49) return; // PDF417 / MaxiCode / other symbologies not drawn
+
+    switch (fn) {
+    case 65: // select model - only model 2 is drawn, so nothing to store
+        break;
+    case 67: // set module size in dots
+        if (parenData.size() >= 3) {
+            int n = parenData[2];
+            if (n >= 1 && n <= 16) qrModuleSize = n;
+        }
+        break;
+    case 69: // set error correction level: '0'..'3' = L, M, Q, H
+        if (parenData.size() >= 3) {
+            int n = parenData[2] - 48;
+            if (n >= 0 && n <= 3) qrEcLevel = n;
+        }
+        break;
+    case 80: // store data in the symbol storage area (parameter m precedes it)
+        if (parenData.size() >= 3) {
+            qrStoredData.assign(parenData.begin() + 3, parenData.end());
+        }
+        break;
+    case 81: // print the stored symbol
+        if (!qrStoredData.empty()) CommitQRCode();
+        break;
+    case 82: // transmit size information - nothing to draw
+        break;
+    default:
+        break;
+    }
+}
+
+void VirtualPrinter::PrintStoredImage(const StoredImage &img, int widthScale,
+                                      int heightScale) {
+    if (img.raster.empty() || img.widthDots <= 0 || img.heightDots <= 0) return;
+    if (widthScale < 1) widthScale = 1;
+    if (heightScale < 1) heightScale = 1;
+
+    if (widthScale == 1 && heightScale == 1) {
+        AddBitmapElement(img.raster, img.widthDots, img.heightDots);
+        return;
+    }
+
+    int srcBytes = (img.widthDots + 7) / 8;
+    int dstWidth = img.widthDots * widthScale;
+    int dstHeight = img.heightDots * heightScale;
+    int dstBytes = (dstWidth + 7) / 8;
+    std::vector<unsigned char> scaled((size_t)dstBytes * dstHeight, 0);
+
+    for (int sy = 0; sy < img.heightDots; ++sy) {
+        const unsigned char *srcRow = &img.raster[(size_t)sy * srcBytes];
+        for (int sx = 0; sx < img.widthDots; ++sx) {
+            if (!((srcRow[sx / 8] >> (7 - (sx % 8))) & 1)) continue;
+            for (int ry = 0; ry < heightScale; ++ry) {
+                unsigned char *dstRow =
+                    &scaled[(size_t)(sy * heightScale + ry) * dstBytes];
+                for (int rx = 0; rx < widthScale; ++rx) {
+                    int px = sx * widthScale + rx;
+                    dstRow[px / 8] |= (unsigned char)(1 << (7 - (px % 8)));
+                }
+            }
+        }
+    }
+    AddBitmapElement(scaled, dstWidth, dstHeight);
+}
+
+void VirtualPrinter::HandleGraphicsCommand() {
+    // GS ( L pL pH m fn [parameters] - m is 48 for all the functions we draw.
+    if (parenData.size() < 2) return;
+    int fn = parenData[1];
+
+    if (fn == 112) {
+        // Store raster graphics in the print buffer:
+        //   m fn a bx by c xL xH yL yH d1...dk
+        if (parenData.size() < 10) return;
+        int bx = parenData[3];
+        int by = parenData[4];
+        int width = parenData[6] + parenData[7] * 256;
+        int height = parenData[8] + parenData[9] * 256;
+        if (width <= 0 || height <= 0) return;
+
+        size_t widthBytes = (size_t)(width + 7) / 8;
+        size_t expected = widthBytes * height;
+        if (parenData.size() < 10 + expected) return; // truncated payload
+
+        graphicsBuffer.widthDots = width;
+        graphicsBuffer.heightDots = height;
+        // The scale factors travel with the buffer until fn 50 prints it.
+        graphicsBuffer.scaleX = bx > 0 ? bx : 1;
+        graphicsBuffer.scaleY = by > 0 ? by : 1;
+        graphicsBuffer.raster.assign(parenData.begin() + 10,
+                                     parenData.begin() + 10 + expected);
+    } else if (fn == 50 || fn == 2) {
+        // Print the graphics currently in the buffer.
+        PrintStoredImage(graphicsBuffer, graphicsBuffer.scaleX,
+                         graphicsBuffer.scaleY);
+    }
+}
+
+void VirtualPrinter::HandleParenCommand() {
+    if (parenId == 0x6B) { // 'k' - 2D codes
+        Handle2DCodeCommand();
+    } else if (parenId == 0x4C) { // 'L' - raster graphics
+        HandleGraphicsCommand();
+    }
+    parenData.clear();
+}
+
+void VirtualPrinter::StoreNvImage() {
+    // FS q stores images column-wise: x bytes across, y bytes down, so the
+    // symbol is x*8 dots wide and y*8 tall and each byte holds 8 vertical dots.
+    int xBytes = nvHeader[0] + nvHeader[1] * 256;
+    int yBytes = nvHeader[2] + nvHeader[3] * 256;
+    int widthDots = xBytes * 8;
+    int heightDots = yBytes * 8;
+
+    StoredImage img;
+    img.widthDots = widthDots;
+    img.heightDots = heightDots;
+    if (widthDots > 0 && heightDots > 0) {
+        int rowBytes = (widthDots + 7) / 8;
+        img.raster.assign((size_t)rowBytes * heightDots, 0);
+        for (int col = 0; col < widthDots; ++col) {
+            for (int vB = 0; vB < yBytes; ++vB) {
+                size_t srcIdx = (size_t)col * yBytes + vB;
+                if (srcIdx >= nvBuffer.size()) break;
+                unsigned char byte = nvBuffer[srcIdx];
+                for (int bit = 0; bit < 8; ++bit) {
+                    if (!((byte >> (7 - bit)) & 1)) continue;
+                    int row = vB * 8 + bit;
+                    img.raster[(size_t)row * rowBytes + (col / 8)] |=
+                        (unsigned char)(1 << (7 - (col % 8)));
+                }
+            }
+        }
+    }
+    nvImages.push_back(img);
+    nvBuffer.clear();
+}
+
+void VirtualPrinter::SkipBytes(long long n, ParseState next) {
+    if (n > 0) {
+        skipRemaining = n;
+        skipReturnState = next;
+        state = STATE_SKIP_N;
+    } else {
+        state = next;
+    }
+}
+
+void VirtualPrinter::BeginLengthSkip(int numLenBytes) {
+    lenBytesRemaining = numLenBytes;
+    lenShift = 0;
+    pendingLen = 0;
+    state = STATE_READ_LEN;
+}
+
+void VirtualPrinter::HandleTab() {
+    // Advance to the next tab stop. ESC D installs explicit stops; without them
+    // printers default to every 8 columns.
+    int target = -1;
+    for (size_t i = 0; i < tabStops.size(); ++i) {
+        if (tabStops[i] > currentColumn) {
+            target = tabStops[i];
+            break;
+        }
+    }
+    if (target < 0) {
+        // Past the last defined stop (or none defined): fall back to every 8.
+        target = ((currentColumn / 8) + 1) * 8;
+    }
+    if (maxColumns > 0 && target >= maxColumns) {
+        AddNewLine();
+        return;
+    }
+    while (currentColumn < target) {
+        currentText += L' ';
+        currentColumn++;
+    }
+}
+
 void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
     if (length <= 0) return;
 
@@ -235,8 +644,17 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 }
                 else if (b == 0x0D) { // CR
                 }
+                else if (b == 0x09) { // HT - horizontal tab
+                    HandleTab();
+                }
+                else if (b == 0x10) { // DLE - real-time commands
+                    state = STATE_DLE;
+                }
                 else if (b == 0x1B) { // ESC
                     state = STATE_ESC;
+                }
+                else if (b == 0x1C) { // FS - two-byte command set
+                    state = STATE_FS;
                 }
                 else if (b == 0x1D) { // GS
                     state = STATE_GS;
@@ -247,7 +665,7 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     // Included handled: 0x0A (LF), 0x0D (CR), 0x1B (ESC), 0x1D (GS)
                     // We should definitely ignore 0x00 (NUL)
                     if (b >= 0x20 || (b > 0x7F && b != 0xFF)) { // 0x80+ are extended chars. 0xFF often ignored?
-                         currentText += MapChar(b, currentCodePage);
+                         currentText += MapCodePageChar(b, currentCodePage);
                          currentColumn++;
                          // Auto-CRLF if maxColumns is set
                          if (maxColumns > 0 && currentColumn >= maxColumns) {
@@ -266,12 +684,26 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     // earlier content such as a QR code. Display separation
                     // between print jobs is handled at the connection level.
                     FlushSegment();
-                    isRedMode = false;
-                    isDoubleWidthMode = false;
-                    isDoubleHeightMode = false;
+                    isEmphasizedMode = false;
+                    isColorRedMode = false;
+                    widthScaleMode = 1;
+                    heightScaleMode = 1;
+                    isReverseMode = false;
+                    isUpsideDownMode = false;
+                    isBoldMode = false;
+                    isRotated90Mode = false;
+                    charSpacingDots = 0;
+                    marginLeftDots = 0;
+                    areaWidthDots = 0;
+                    currentFont = FONT_A;
                     isUnderlineMode = false;
                     currentLineSpacing = -1;
                     currentAlign = 0; // Left
+                    tabStops.clear();
+                    barcodeHeight = 162;
+                    barcodeModule = 3;
+                    barcodeHriPos = 0;
+                    barcodeHriFont = 0;
                     state = STATE_NORMAL;
                 }
                 else if (b == 0x45) { // E - Emphasized / Red
@@ -314,22 +746,206 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     AddCutLine();
                     state = STATE_NORMAL;
                 }
+                else if (b == 0x28) { // ( - ESC ( fn pL pH d1...dk
+                    state = STATE_PAREN_fn;
+                }
+                else if (b == 0x26) { // & - Define user-defined characters
+                    state = STATE_ESC_AMP_y;
+                }
+                else if (b == 0x44) { // D - Set horizontal tab positions
+                    tabStops.clear();
+                    state = STATE_ESC_D;
+                }
+                else if (b == 0x7B) { // { - Upside-down printing
+                    state = STATE_ESC_BRACE;
+                }
+                else if (b == 0x4D) { // M - Select character font
+                    state = STATE_ESC_M;
+                }
+                else if (b == 0x47 || b == 0x67) { // G / g - Double-strike
+                    state = STATE_ESC_G;
+                }
+                else if (b == 0x72) { // r - Select print colour
+                    state = STATE_ESC_r;
+                }
+                else if (b == 0x20) { // SP - Right-side character spacing
+                    state = STATE_ESC_SP;
+                }
+                else if (b == 0x56) { // V - 90 degree clockwise rotation
+                    state = STATE_ESC_V;
+                }
+                else if (b == 0x24) { // $ - Absolute print position
+                    state = STATE_ESC_DOLLAR_nL;
+                }
+                else if (b == 0x5C) { // \ - Relative print position
+                    state = STATE_ESC_BSLASH_nL;
+                }
+                else if (b == 0x4A) { // J - Print and feed n dots
+                    state = STATE_ESC_J;
+                }
+                else if (b == 0x4B) { // K - Print and reverse feed n dots
+                    state = STATE_ESC_K;
+                }
+                else if (b == 0x65) { // e - Print and reverse feed n lines
+                    state = STATE_ESC_e;
+                }
                 else {
-                    state = STATE_NORMAL;
+                    int params = LookupParams(ESC_SKIP,
+                                              sizeof(ESC_SKIP) / sizeof(ESC_SKIP[0]), b);
+                    if (params >= 0) {
+                        SkipBytes(params);
+                    } else {
+                        state = STATE_NORMAL;
+                    }
                 }
                 break;
             
             case STATE_ESC_EXCLAMATION:
                 // n parsing
+                // Bit 0: Font B (vs Font A)
                 // Bit 3: Emphasized (Red in our case)
                 // Bit 4: Double Height
                 // Bit 5: Double Width
                 // Bit 7: Underline
                 FlushSegment();
-                isRedMode = (b & 0x08) != 0;
-                isDoubleHeightMode = (b & 0x10) != 0;
-                isDoubleWidthMode = (b & 0x20) != 0;
+                currentFont = (b & 0x01) ? FONT_B : FONT_A;
+                isEmphasizedMode = (b & 0x08) != 0;
+                // ESC ! and GS ! drive the same character-size register, so the
+                // last one wins rather than combining.
+                heightScaleMode = (b & 0x10) ? 2 : 1;
+                widthScaleMode = (b & 0x20) ? 2 : 1;
                 isUnderlineMode = (b & 0x80) != 0;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_EXCLAMATION:
+                // GS ! n - bits 0-2 are the height multiplier - 1,
+                //          bits 4-6 the width multiplier - 1 (both 1..8).
+                FlushSegment();
+                heightScaleMode = (b & 0x07) + 1;
+                widthScaleMode = ((b >> 4) & 0x07) + 1;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_B:
+                // GS B n - the least significant bit turns reverse printing on.
+                FlushSegment();
+                isReverseMode = (b & 0x01) != 0;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_BRACE:
+                // ESC { n - the least significant bit turns upside-down mode on.
+                FlushSegment();
+                isUpsideDownMode = (b & 0x01) != 0;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_M:
+                // ESC M n - 0/48 = Font A, 1/49 = Font B, 2/50 = Font C.
+                FlushSegment();
+                if (b == 1 || b == 49)      currentFont = FONT_B;
+                else if (b == 2 || b == 50) currentFont = FONT_C;
+                else                        currentFont = FONT_A;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_G:
+                // ESC G n / ESC g n - double-strike, rendered as bold.
+                FlushSegment();
+                isBoldMode = (b & 0x01) != 0;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_r:
+                // ESC r n - 0/48 = black, 1/49 = red.
+                FlushSegment();
+                isColorRedMode = (b == 1 || b == 49);
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_SP:
+                // ESC SP n - extra space to the right of each character, in dots.
+                FlushSegment();
+                charSpacingDots = b;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_V:
+                // ESC V n - rotate each character 90 degrees clockwise.
+                FlushSegment();
+                isRotated90Mode = (b == 1 || b == 49);
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_DOLLAR_nL:
+                pendingParam = b;
+                state = STATE_ESC_DOLLAR_nH;
+                break;
+
+            case STATE_ESC_DOLLAR_nH:
+                // ESC $ nL nH - absolute position, in dots from the left margin.
+                AddSetPos(pendingParam + b * 256, true);
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_BSLASH_nL:
+                pendingParam = b;
+                state = STATE_ESC_BSLASH_nH;
+                break;
+
+            case STATE_ESC_BSLASH_nH:
+            {
+                // ESC \ nL nH - relative move; the 16-bit value is signed, so
+                // negative offsets move back towards the left margin.
+                int offset = pendingParam + b * 256;
+                if (offset > 32767) offset -= 65536;
+                AddSetPos(offset, false);
+                state = STATE_NORMAL;
+                break;
+            }
+
+            case STATE_ESC_J:
+                // ESC J n - print and feed n dots forward.
+                AddFeed(b);
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_K:
+                // ESC K n - print and feed n dots backwards.
+                AddFeed(-(int)b);
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_e:
+                // ESC e n - print and feed n lines backwards.
+                FlushSegment();
+                AddFeed(-(int)b * (currentLineSpacing >= 0 ? currentLineSpacing : 30));
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_L_nL:
+                pendingParam = b;
+                state = STATE_GS_L_nH;
+                break;
+
+            case STATE_GS_L_nH:
+                // GS L nL nH - left margin in dots.
+                FlushSegment();
+                marginLeftDots = pendingParam + b * 256;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_W_nL:
+                pendingParam = b;
+                state = STATE_GS_W_nH;
+                break;
+
+            case STATE_GS_W_nH:
+                // GS W nL nH - print area width in dots (0 restores the full
+                // paper width).
+                FlushSegment();
+                areaWidthDots = pendingParam + b * 256;
                 state = STATE_NORMAL;
                 break;
             
@@ -420,34 +1036,15 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 break;
             
             case STATE_ESC_c:
-                if (b == 0x34) { // '4'
-                    state = STATE_ESC_c_4;
-                }
-                else if (b == 0x35) { // '5'
-                    state = STATE_ESC_c_5;
-                }
-                else {
-                    state = STATE_NORMAL;
-                }
-                break;
-
-            case STATE_ESC_c_4:
-                // Consume n
-                state = STATE_NORMAL;
-                break;
-
-            case STATE_ESC_c_5:
-                // Consume n
-                state = STATE_NORMAL;
+                // ESC c 0/1 (sheet select), ESC c 3 (paper sensors), ESC c 4
+                // (sensors that stop printing), ESC c 5 (panel buttons).
+                // All of them take a single parameter byte.
+                SkipBytes(1);
                 break;
 
             case STATE_ESC_E:
                 FlushSegment(); // Flush current text with old style
-                if ((b & 1) == 1) {
-                    isRedMode = true;
-                } else {
-                    isRedMode = false;
-                }
+                isEmphasizedMode = (b & 1) == 1;
                 state = STATE_NORMAL;
                 break;
 
@@ -465,8 +1062,47 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 else if (b == 0x2F) { // / Print download bit image
                     state = STATE_GS_SLASH;
                 }
+                else if (b == 0x28) { // ( GS ( <id> pL pH d1...dk
+                    state = STATE_GS_PAREN_id;
+                }
+                else if (b == 0x38) { // 8 GS 8 L p1 p2 p3 p4 ... (large graphics)
+                    state = STATE_GS_8;
+                }
+                else if (b == 0x6B) { // k Print barcode
+                    state = STATE_GS_k;
+                }
+                else if (b == 0x68) { // h Set barcode height
+                    state = STATE_GS_h;
+                }
+                else if (b == 0x77) { // w Set barcode module width
+                    state = STATE_GS_w;
+                }
+                else if (b == 0x48) { // H Select HRI print position
+                    state = STATE_GS_H;
+                }
+                else if (b == 0x66) { // f Select HRI font
+                    state = STATE_GS_f;
+                }
+                else if (b == 0x21) { // ! Select character size
+                    state = STATE_GS_EXCLAMATION;
+                }
+                else if (b == 0x42) { // B Reverse (white on black) printing
+                    state = STATE_GS_B;
+                }
+                else if (b == 0x4C) { // L Set left margin
+                    state = STATE_GS_L_nL;
+                }
+                else if (b == 0x57) { // W Set print area width
+                    state = STATE_GS_W_nL;
+                }
                 else {
-                    state = STATE_NORMAL;
+                    int params = LookupParams(GS_SKIP,
+                                              sizeof(GS_SKIP) / sizeof(GS_SKIP[0]), b);
+                    if (params >= 0) {
+                        SkipBytes(params);
+                    } else {
+                        state = STATE_NORMAL;
+                    }
                 }
                 break;
 
@@ -611,6 +1247,289 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     state = STATE_NORMAL;
                 }
                 break;
+
+            // --- Generic parameter consumption -----------------------------
+
+            case STATE_SKIP_N:
+                if (--skipRemaining <= 0) state = skipReturnState;
+                break;
+
+            case STATE_READ_LEN:
+                pendingLen |= ((long long)b) << lenShift;
+                lenShift += 8;
+                if (--lenBytesRemaining <= 0) {
+                    SkipBytes(pendingLen);
+                }
+                break;
+
+            case STATE_PAREN_fn:
+                // ESC ( fn pL pH d1...dk - none of these are drawn, so the
+                // payload is only consumed.
+                BeginLengthSkip(2);
+                break;
+
+            case STATE_GS_PAREN_id:
+                parenId = b;
+                state = STATE_GS_PAREN_pL;
+                break;
+
+            case STATE_GS_PAREN_pL:
+                pendingParam = b;
+                state = STATE_GS_PAREN_pH;
+                break;
+
+            case STATE_GS_PAREN_pH:
+            {
+                parenExpected = pendingParam + b * 256;
+                parenData.clear();
+                if (parenExpected <= 0) {
+                    state = STATE_NORMAL;
+                } else if ((parenId == 0x6B || parenId == 0x4C) &&
+                           parenExpected <= MAX_IMAGE_BYTES) {
+                    // 'k' (2D codes) and 'L' (raster graphics) are drawn, so
+                    // their payloads are collected rather than skipped.
+                    parenData.reserve((size_t)parenExpected);
+                    state = STATE_GS_PAREN_DATA;
+                } else {
+                    // Other groups are recognised but not drawn; swallow them.
+                    SkipBytes(parenExpected);
+                }
+                break;
+            }
+
+            case STATE_GS_PAREN_DATA:
+                parenData.push_back(b);
+                if ((long long)parenData.size() >= parenExpected) {
+                    HandleParenCommand();
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_GS_8:
+                // GS 8 L p1 p2 p3 p4 m fn ... - the identifier is consumed
+                // here; the four following bytes are a 32-bit little-endian
+                // length. The payload is the same shape as GS ( L, so it is
+                // routed through the same handler.
+                parenId = b;
+                lenBytesRemaining = 4;
+                lenShift = 0;
+                pendingLen = 0;
+                state = STATE_GS_8_LEN;
+                break;
+
+            case STATE_GS_8_LEN:
+                pendingLen |= ((long long)b) << lenShift;
+                lenShift += 8;
+                if (--lenBytesRemaining <= 0) {
+                    parenExpected = pendingLen;
+                    parenData.clear();
+                    if (parenExpected <= 0) {
+                        state = STATE_NORMAL;
+                    } else if (parenId == 0x4C && parenExpected <= MAX_IMAGE_BYTES) {
+                        parenData.reserve((size_t)parenExpected);
+                        state = STATE_GS_PAREN_DATA;
+                    } else {
+                        SkipBytes(parenExpected);
+                    }
+                }
+                break;
+
+            case STATE_ESC_AMP_y:
+                userCharY = b;
+                state = STATE_ESC_AMP_c1;
+                break;
+
+            case STATE_ESC_AMP_c1:
+                userCharRemaining = b; // holds c1 until c2 arrives
+                state = STATE_ESC_AMP_c2;
+                break;
+
+            case STATE_ESC_AMP_c2:
+                // Characters c1..c2 follow, each as "x d1...d(x*y)".
+                userCharRemaining = (int)b - userCharRemaining + 1;
+                state = (userCharRemaining > 0) ? STATE_ESC_AMP_x : STATE_NORMAL;
+                break;
+
+            case STATE_ESC_AMP_x:
+                userCharRemaining--;
+                SkipBytes((long long)b * userCharY,
+                          userCharRemaining > 0 ? STATE_ESC_AMP_x : STATE_NORMAL);
+                break;
+
+            case STATE_ESC_D:
+                // ESC D n1...nk NUL - tab stop columns, terminated by NUL.
+                if (b == 0x00) {
+                    state = STATE_NORMAL;
+                } else if (tabStops.size() < 32) {
+                    tabStops.push_back(b);
+                }
+                break;
+
+            case STATE_DLE:
+                if (b == 0x04 || b == 0x05) { // DLE EOT n / DLE ENQ n
+                    SkipBytes(1);
+                } else if (b == 0x14) { // DLE DC4 fn ...
+                    state = STATE_DLE_DC4;
+                } else {
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_DLE_DC4:
+                // fn = 1: m t (drawer pulse); fn = 2: a b (power off);
+                // fn = 8: d1...d7 (clear buffers).
+                if (b == 1 || b == 2) {
+                    SkipBytes(2);
+                } else if (b == 8) {
+                    SkipBytes(7);
+                } else {
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_FS:
+                if (b == 0x71) { // q - define NV bit images
+                    state = STATE_FS_q_n;
+                } else if (b == 0x70) { // p - print NV bit image
+                    state = STATE_FS_p_n;
+                } else {
+                    int params = LookupParams(FS_SKIP,
+                                              sizeof(FS_SKIP) / sizeof(FS_SKIP[0]), b);
+                    if (params >= 0) {
+                        SkipBytes(params);
+                    } else {
+                        state = STATE_NORMAL;
+                    }
+                }
+                break;
+
+            case STATE_FS_q_n:
+                // FS q n [xL xH yL yH d1...dk] * n - redefining the NV images
+                // replaces whatever was stored before.
+                nvImagesRemaining = b;
+                nvHeaderIndex = 0;
+                nvImages.clear();
+                nvBuffer.clear();
+                state = (nvImagesRemaining > 0) ? STATE_FS_q_HDR : STATE_NORMAL;
+                break;
+
+            case STATE_FS_q_HDR:
+                nvHeader[nvHeaderIndex++] = b;
+                if (nvHeaderIndex >= 4) {
+                    long long xBytes = nvHeader[0] + nvHeader[1] * 256;
+                    long long yBytes = nvHeader[2] + nvHeader[3] * 256;
+                    nvHeaderIndex = 0;
+                    nvExpected = xBytes * yBytes * 8;
+                    nvImagesRemaining--;
+                    if (nvExpected > 0 && nvExpected <= MAX_IMAGE_BYTES) {
+                        nvBuffer.clear();
+                        nvBuffer.reserve((size_t)nvExpected);
+                        state = STATE_FS_q_DATA;
+                    } else {
+                        // Empty or implausibly large: consume without storing.
+                        SkipBytes(nvExpected, nvImagesRemaining > 0 ? STATE_FS_q_HDR
+                                                                   : STATE_NORMAL);
+                    }
+                }
+                break;
+
+            case STATE_FS_q_DATA:
+                nvBuffer.push_back(b);
+                if ((long long)nvBuffer.size() >= nvExpected) {
+                    StoreNvImage();
+                    state = (nvImagesRemaining > 0) ? STATE_FS_q_HDR : STATE_NORMAL;
+                }
+                break;
+
+            case STATE_FS_p_n:
+                // FS p n m - n selects the stored image, counting from 1.
+                nvImageIndex = b;
+                state = STATE_FS_p_m;
+                break;
+
+            case STATE_FS_p_m:
+            {
+                // m: 0/48 normal, 1/49 double width, 2/50 double height,
+                // 3/51 quadruple.
+                int mode = (b >= 48) ? b - 48 : b;
+                int sx = (mode == 1 || mode == 3) ? 2 : 1;
+                int sy = (mode == 2 || mode == 3) ? 2 : 1;
+                if (nvImageIndex >= 1 && nvImageIndex <= (int)nvImages.size()) {
+                    PrintStoredImage(nvImages[nvImageIndex - 1], sx, sy);
+                }
+                state = STATE_NORMAL;
+                break;
+            }
+
+            // --- Barcodes ---------------------------------------------------
+
+            case STATE_GS_h: // GS h n - height in dots
+                barcodeHeight = b;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_w: // GS w n - narrow element width in dots
+                // n = 2..6 for the standard symbologies; 68..76 select the
+                // wider modules some models offer. Anything else is ignored.
+                if (b >= 2 && b <= 6) barcodeModule = b;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_H: // GS H n - HRI position
+                if (b == 1 || b == 49)      barcodeHriPos = 1; // above
+                else if (b == 2 || b == 50) barcodeHriPos = 2; // below
+                else if (b == 3 || b == 51) barcodeHriPos = 3; // both
+                else                        barcodeHriPos = 0; // not printed
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_f: // GS f n - HRI font
+                barcodeHriFont = b;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_k:
+                // Function A (m = 0..6) is NUL-terminated; function B
+                // (m = 65..73) is preceded by a length byte.
+                // An unrecognised m still has its payload consumed: leaking it
+                // into the text stream is worse than printing nothing.
+                if (b >= 65) {
+                    barcodeType = BarcodeTypeFromM(b, false);
+                    state = STATE_GS_k_n;
+                } else {
+                    barcodeType = BarcodeTypeFromM(b, true);
+                    barcodeData.clear();
+                    state = STATE_GS_k_DATA_A;
+                }
+                break;
+
+            case STATE_GS_k_DATA_A:
+                if (b == 0x00) {
+                    CommitBarcode();
+                    state = STATE_NORMAL;
+                } else {
+                    barcodeData.push_back(b);
+                }
+                break;
+
+            case STATE_GS_k_n:
+                barcodeExpected = b;
+                barcodeData.clear();
+                if (barcodeExpected > 0) {
+                    barcodeData.reserve(barcodeExpected);
+                    state = STATE_GS_k_DATA_B;
+                } else {
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_GS_k_DATA_B:
+                barcodeData.push_back(b);
+                if ((int)barcodeData.size() >= barcodeExpected) {
+                    CommitBarcode();
+                    state = STATE_NORMAL;
+                }
+                break;
             }
         }
     }
@@ -628,11 +1547,7 @@ std::vector<PrinterElement> VirtualPrinter::GetElements() {
         PrinterElement el;
         el.type = ELEMENT_TEXT;
         el.text = currentText;
-        el.isRed = isRedMode;
-        el.isDoubleWidth = isDoubleWidthMode;
-        el.isDoubleHeight = isDoubleHeightMode;
-        el.isUnderline = isUnderlineMode;
-        el.align = currentAlign;
+        ApplyStyle(el);
         result.push_back(el);
     }
 

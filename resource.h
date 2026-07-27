@@ -12,6 +12,7 @@
 #define IDM_FONTE       205
 #define IDM_LIMPAR      206
 #define IDM_ALWAYSONTOP 207
+#define IDM_INSTALAR_DRIVER 208
 
 // Dialog IDs
 #define IDD_INPUT_DLG   300

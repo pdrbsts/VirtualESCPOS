@@ -1,11 +1,19 @@
 #include <windows.h>
 #include "resource.h"
 
+// Build number is passed by build.bat via "rc /d BUILD_NUMBER=<n>".
+// Falls back to 0 when built without it (e.g. from an IDE).
+#ifndef BUILD_NUMBER
+#define BUILD_NUMBER 0
+#endif
+#define VER_STR2(x) #x
+#define VER_STR(x) VER_STR2(x)
+
 IDI_ICON1               ICON                    "icon.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION    1,0,0,BUILD_NUMBER
+ PRODUCTVERSION 1,0,0,BUILD_NUMBER
  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS      VS_FF_DEBUG
@@ -22,12 +30,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "MAPENO.pt\0"
             VALUE "FileDescription",  "VirtualEscPos\0"
-            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "FileVersion",      "1.0.0." VER_STR(BUILD_NUMBER) "\0"
             VALUE "InternalName",     "VirtualEscPos.exe\0"
             VALUE "LegalCopyright",   "Copyright (C) 2022 MAPENO.pt\0"
             VALUE "OriginalFilename", "VirtualEscPos.exe\0"
             VALUE "ProductName",      "VirtualEscPos\0"
-            VALUE "ProductVersion",   "1.0.0.0\0"
+            VALUE "ProductVersion",   "1.0.0." VER_STR(BUILD_NUMBER) "\0"
         END
     END
     BLOCK "VarFileInfo"

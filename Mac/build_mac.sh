@@ -9,6 +9,12 @@ ln -sf ../Network.cpp Network.cpp
 ln -sf ../Network.h Network.h
 ln -sf ../VirtualPrinter.cpp VirtualPrinter.cpp
 ln -sf ../VirtualPrinter.h VirtualPrinter.h
+ln -sf ../Barcode.cpp Barcode.cpp
+ln -sf ../Barcode.h Barcode.h
+ln -sf ../CodePages.cpp CodePages.cpp
+ln -sf ../CodePages.h CodePages.h
+ln -sf ../QRCode.cpp QRCode.cpp
+ln -sf ../QRCode.h QRCode.h
 
 # Build for release
 echo "Building VirtualESCPOS..."
@@ -16,7 +22,7 @@ swift build -c release
 BUILD_RESULT=$?
 
 # Restore (remove links)
-rm Network.cpp Network.h VirtualPrinter.cpp VirtualPrinter.h
+rm Network.cpp Network.h VirtualPrinter.cpp VirtualPrinter.h Barcode.cpp Barcode.h CodePages.cpp CodePages.h QRCode.cpp QRCode.h
 
 # Check if build was successful
 if [ $BUILD_RESULT -eq 0 ]; then
