@@ -57,18 +57,25 @@ if [ $BUILD_RESULT -eq 0 ]; then
     # Copy binary
     cp .build/release/VirtualESCPOS "$MACOS_DIR/$APP_NAME"
 
+    # Copy standalone binary to dist/ for direct binary usage (like NetworkMapper)
+    cp .build/release/VirtualESCPOS dist/VirtualESCPOS
+
     # Optional: set executable permission just in case
     chmod +x "$MACOS_DIR/$APP_NAME"
+    chmod +x dist/VirtualESCPOS
+
+    # Clear attributes & Ad-hoc code sign the bundle so Gatekeeper recognizes it as valid
+    xattr -cr "$APP_BUNDLE"
+    codesign --force --deep --sign - "$APP_BUNDLE"
 
     echo "Done! Application bundle is at $APP_BUNDLE"
 
-    # Create a zip file for distribution
-    ZIP_NAME="$APP_NAME.mac.zip"
-    echo "Creating zip archive: dist/$ZIP_NAME"
-    # -r recursive, -y store symlinks as links not referenced file
-    # Run in subshell to not change script cwd
-    (cd dist && zip -r -y "../dist/$ZIP_NAME" "$APP_NAME.app")
-    echo "Zip archive created at dist/$ZIP_NAME"
+    # Create zip archives using ditto to preserve macOS app bundle attributes and signature
+    echo "Creating zip archives: dist/$APP_NAME.zip and dist/$APP_NAME.mac.zip"
+    rm -f "dist/$APP_NAME.zip" "dist/$APP_NAME.mac.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "dist/$APP_NAME.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "dist/$APP_NAME.mac.zip"
+    echo "Zip archives created."
 
     # Create a DMG for distribution
     DMG_NAME="dist/$APP_NAME.dmg"
