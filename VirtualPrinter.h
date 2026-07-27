@@ -17,7 +17,12 @@ enum ElementType {
   ELEMENT_BITMAP,
   ELEMENT_CUT,
   ELEMENT_SETPOS, // ESC $ / ESC \ - move the horizontal print position
-  ELEMENT_FEED    // ESC J / ESC K - feed the paper by a number of dots
+  ELEMENT_FEED,   // ESC J / ESC K - feed the paper by a number of dots
+  // Page mode (ESC L): the elements between BEGIN and END are positioned by
+  // their own pageX/pageY instead of flowing, and BEGIN carries the print
+  // area set by ESC W.
+  ELEMENT_PAGE_BEGIN,
+  ELEMENT_PAGE_END
 };
 
 // A character cell in Font A is 12 dots wide and 24 tall. Horizontal ESC/POS
@@ -34,8 +39,8 @@ enum PrinterFont {
 
 struct PrinterElement {
   ElementType type;
-  std::wstring text; // For text elements
-  bool isRed;        // For 1B 45 1 (Red) vs 0 (Black)
+  std::wstring text;  // For text elements
+  bool isRed = false; // For 1B 45 1 (Red) vs 0 (Black)
   // Character size multipliers, 1..8 (ESC ! bits 4/5 and GS ! n).
   int widthScale = 1;
   int heightScale = 1;
@@ -48,7 +53,7 @@ struct PrinterElement {
   int areaWidth = 0;         // GS W - print area width in dots (0 = full paper)
   bool absolutePos = false;  // ELEMENT_SETPOS: absolute (ESC $) vs relative
   int font = FONT_A;         // ESC M n
-  bool isUnderline;                      // For 1B 2D n
+  bool isUnderline = false;              // For 1B 2D n
   std::vector<unsigned char> bitmapData; // For bitmap elements
   bool isColumnFormat; // True = Column-major (GS *), False = Row-major/Raster
                        // (GS v 0)
@@ -56,9 +61,20 @@ struct PrinterElement {
                               // bands separated by a single line feed are
                               // stacked into one contiguous bitmap.
   int align = 0; // Justification: 0 = left, 1 = center, 2 = right (ESC a n)
-  int width;
-  int height;
+  // Meaning depends on the type: dots of movement for SETPOS/FEED, dot size
+  // for BITMAP, print area size for PAGE_BEGIN/PAGE_END, line spacing for
+  // NEWLINE.
+  int width = 0;
+  int height = 0;
   // x is determined at render time for flow
+  // --- Page mode -----------------------------------------------------------
+  // For elements inside a page: the position, in dots, within the print area,
+  // expressed in the coordinate system of pageDir. For ELEMENT_PAGE_BEGIN:
+  // the origin of the print area (ESC W x, y) and width/height carry its size.
+  int pageX = 0;
+  int pageY = 0;
+  int pageDir = 0; // ESC T n: 0 left-right, 1 bottom-top, 2 right-left,
+                   //          3 top-bottom
 };
 
 class VirtualPrinter {
@@ -197,7 +213,18 @@ private:
     // Feeds: ESC J n / ESC K n (dots) and ESC e n (reverse lines)
     STATE_ESC_J,
     STATE_ESC_K,
-    STATE_ESC_e
+    STATE_ESC_e,
+
+    // Page mode: ESC T n (print direction) and
+    // ESC W xL xH yL yH dxL dxH dyL dyH (print area)
+    STATE_ESC_T,
+    STATE_ESC_W,
+
+    // GS $ nL nH / GS \ nL nH - vertical print position in page mode
+    STATE_GS_DOLLAR_nL,
+    STATE_GS_DOLLAR_nH,
+    STATE_GS_BSLASH_nL,
+    STATE_GS_BSLASH_nH
   };
 
   ParseState state;
@@ -239,6 +266,21 @@ private:
   // Max columns (0 = disabled)
   int maxColumns;
   int currentColumn; // Current column position for auto-CRLF
+
+  // --- Page mode (ESC L) ----------------------------------------------------
+  // While page mode is active nothing reaches the paper: elements are buffered
+  // with an explicit position inside the print area and only committed when
+  // FF / ESC FF prints the page.
+  bool pageMode;
+  int pageOriginX;   // ESC W x, in dots from the left of the printable area
+  int pageOriginY;   // ESC W y, in dots down the paper
+  int pageAreaW;     // ESC W dx, 0 = never set (renderer sizes to content)
+  int pageAreaH;     // ESC W dy
+  int pageDirection; // ESC T n, 0..3
+  int pageCursorX;   // print position along the text flow, in dots
+  int pageCursorY;   // print position across lines, in dots
+  std::vector<PrinterElement> pageElements;
+  std::vector<unsigned char> pendingParams; // ESC W's eight parameter bytes
 
   // Current text buffer
   std::wstring currentText;
@@ -314,6 +356,25 @@ private:
   void AddNewLine();
   void AddCutLine();
   void CommitEscStarBand();
+
+  // --- Page mode helpers ----------------------------------------------------
+  // The buffer new elements go to: the page buffer while page mode is active.
+  std::vector<PrinterElement> &Target();
+  // Appends an element, stamping it with the page position in page mode and
+  // advancing the print position past it.
+  void PushElement(PrinterElement &el);
+  // Enters page mode (ESC L) and clears the page buffer.
+  void EnterPageMode();
+  // Leaves page mode. `print` commits the buffered page to the paper
+  // (FF, ESC FF); otherwise the page is discarded (CAN, ESC S, ESC @).
+  void LeavePageMode(bool print, bool stayInPageMode = false);
+  // Width/height of one character cell in dots, with the current font and
+  // size multipliers applied. Used to advance the page-mode print position.
+  int CharWidthDots() const;
+  int CharHeightDots() const;
+  // Length of the print area along the current text flow direction, in dots
+  // (0 when ESC W never ran).
+  int PageFlowLength() const;
 
   // Consume `n` bytes of parameters, then enter `next`.
   void SkipBytes(long long n, ParseState next = STATE_NORMAL);

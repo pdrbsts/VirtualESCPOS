@@ -232,9 +232,204 @@
     return startX;
   };
 
+  // --- Page mode (ESC L) ----------------------------------------------------
+  // Elements between ELEMENT_PAGE_BEGIN and ELEMENT_PAGE_END do not flow: each
+  // one carries the position it was printed at inside the print area, in the
+  // coordinate system of the print direction set by ESC T. Mapping page
+  // coordinates onto the paper is one affine transform per direction, which
+  // also produces the glyph rotation the printer applies to directions 1 to 3.
+  // This view is flipped (y grows downwards), so the transforms are the same
+  // ones the Windows renderer uses.
+  auto pageTransform = [](int dir, CGFloat px, CGFloat py, CGFloat pw,
+                          CGFloat ph) -> CGAffineTransform {
+    switch (dir) {
+    case 1: // bottom to top, starting at the lower-left corner
+      return CGAffineTransformMake(0, -1, 1, 0, px, py + ph);
+    case 2: // right to left, starting at the lower-right corner
+      return CGAffineTransformMake(-1, 0, 0, -1, px + pw, py + ph);
+    case 3: // top to bottom, starting at the upper-right corner
+      return CGAffineTransformMake(0, 1, -1, 0, px + pw, py);
+    default: // 0: left to right, starting at the upper-left corner
+      return CGAffineTransformMake(1, 0, 0, 1, px, py);
+    }
+  };
+
+  // Drawn size of a text or bitmap element. Bitmaps are scaled like every
+  // other page coordinate so a dot keeps the same size all over the page.
+  auto measureElementBox = [&](const PrinterElement &e) -> NSSize {
+    if (e.type == ELEMENT_BITMAP)
+      return NSMakeSize(dotsToPoints(e.width), dotsToPoints(e.height));
+    NSString *t = stringForElement(e);
+    NSSize sz = [t sizeWithAttributes:attrsForElement(e)];
+    if (e.isRotated90) {
+      CGFloat cell = sz.height * e.heightScale;
+      return NSMakeSize(cell * (CGFloat)t.length, cell);
+    }
+    return NSMakeSize(sz.width * e.widthScale, sz.height * e.heightScale);
+  };
+
+  // How much paper the page needs when ESC W did not state a height.
+  // Directions 1 and 3 print along the paper's vertical axis, so there it is
+  // the text flow that decides how far down the page reaches.
+  auto measurePageContentHeight = [&](size_t startIdx) -> CGFloat {
+    CGFloat needed = 0;
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+      const auto &e = elements[i];
+      if (e.type == ELEMENT_PAGE_END)
+        break;
+      if (e.type != ELEMENT_TEXT && e.type != ELEMENT_BITMAP)
+        continue;
+      NSSize box = measureElementBox(e);
+      CGFloat extent = (e.pageDir == 1 || e.pageDir == 3)
+                           ? dotsToPoints(e.pageX) + box.width
+                           : dotsToPoints(e.pageY) + box.height;
+      if (extent > needed)
+        needed = extent;
+    }
+    return needed;
+  };
+
+  // Row-major 1bpp raster of a bitmap element; GS * data arrives column-major.
+  auto elementRaster =
+      [](const PrinterElement &e) -> std::vector<unsigned char> {
+    if (!e.isColumnFormat)
+      return e.bitmapData;
+
+    int xBytes = e.width / 8;
+    int yBytes = e.height / 8;
+    int widthDots = xBytes * 8;
+    int heightDots = yBytes * 8;
+    int stride = xBytes;
+    std::vector<unsigned char> dst(stride * heightDots, 0);
+
+    for (int col = 0; col < widthDots; col++) {
+      for (int vB = 0; vB < yBytes; vB++) {
+        size_t srcIdx = (size_t)col * yBytes + vB;
+        if (srcIdx >= e.bitmapData.size())
+          break;
+        unsigned char b = e.bitmapData[srcIdx];
+        for (int bit = 0; bit < 8; bit++) {
+          if (!((b >> (7 - bit)) & 1))
+            continue;
+          int row = vB * 8 + bit;
+          dst[row * stride + (col / 8)] |= (1 << (7 - (col % 8)));
+        }
+      }
+    }
+    return dst;
+  };
+
+  // 1bpp image for a bitmap element. The decode array swaps the gray ramp so
+  // that a set bit comes out black.
+  auto makeElementImage = [&](const PrinterElement &e) -> CGImageRef {
+    std::vector<unsigned char> raster = elementRaster(e);
+    if (raster.empty() || e.width <= 0 || e.height <= 0)
+      return NULL;
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceGray();
+    CFDataRef dataRef = CFDataCreate(NULL, raster.data(), raster.size());
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData(dataRef);
+    CGFloat decode[] = {1.0, 0.0};
+    size_t bytesPerRow = (e.width + 7) / 8;
+
+    CGImageRef image = CGImageCreate(e.width, e.height,
+                                     1, // bitsPerComponent
+                                     1, // bitsPerPixel
+                                     bytesPerRow, colorSpace,
+                                     kCGBitmapByteOrderDefault, provider, decode,
+                                     false, kCGRenderingIntentDefault);
+
+    CGDataProviderRelease(provider);
+    CFRelease(dataRef);
+    CGColorSpaceRelease(colorSpace);
+    return image; // the image holds its own reference to the data
+  };
+
+  // Draws a bitmap element with its top-left corner at (x, y0), scaled to
+  // w x h points. The view is flipped, so the image is drawn through a local
+  // flip to keep row 0 at the top.
+  auto drawBitmapAt = [&](const PrinterElement &e, CGFloat x, CGFloat y0,
+                          CGFloat w, CGFloat h) {
+    CGImageRef image = makeElementImage(e);
+    if (!image)
+      return;
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context, 0, y0 + h);
+    CGContextScaleCTM(context, 1.0, -1.0);
+    CGContextDrawImage(context, CGRectMake(x, 0, w, h), image);
+    CGContextRestoreGState(context);
+    CGImageRelease(image);
+  };
+
+  bool inPage = false;
+  CGFloat pageLeft = 0, pageTop = 0, pageW = 0, pageH = 0;
+
   bool atLineStart = true;
   for (size_t idx = 0; idx < elements.size(); ++idx) {
     const auto &el = elements[idx];
+
+    if (el.type == ELEMENT_PAGE_BEGIN) {
+      if (!atLineStart) {
+        y += currentLineMaxHeight + 4;
+        currentLineMaxHeight = g_fontSize + 4;
+      }
+      currentX = leftMargin;
+      atLineStart = true;
+
+      // One scale on both axes, so a page turned by ESC T keeps its shape.
+      pageLeft = leftMargin + dotsToPoints(el.pageX);
+      pageTop = y + dotsToPoints(el.pageY);
+      pageW = dotsToPoints(el.width);
+      pageH = dotsToPoints(el.height);
+      if (pageW <= 0)
+        pageW = (paperWidth > 0) ? paperWidth : width - pageLeft - leftMargin;
+      if (pageH <= 0)
+        pageH = measurePageContentHeight(idx + 1); // ESC W never ran
+      if (pageW < 1)
+        pageW = 1;
+      if (pageH < 1)
+        pageH = 1;
+
+      CGContextSaveGState(context);
+      CGContextClipToRect(context, CGRectMake(pageLeft, pageTop, pageW, pageH));
+      inPage = true;
+      continue;
+    }
+
+    if (el.type == ELEMENT_PAGE_END) {
+      if (inPage)
+        CGContextRestoreGState(context);
+      // The printer feeds the whole print area, filled or not, so the next
+      // line starts below the page.
+      y = pageTop + pageH;
+      inPage = false;
+      currentX = leftMargin;
+      atLineStart = true;
+      currentLineMaxHeight = g_fontSize + 4;
+      continue;
+    }
+
+    if (inPage) {
+      if (el.type != ELEMENT_TEXT && el.type != ELEMENT_BITMAP)
+        continue;
+
+      CGContextSaveGState(context);
+      CGContextConcatCTM(context,
+                         pageTransform(el.pageDir, pageLeft, pageTop, pageW, pageH));
+
+      CGFloat localX = dotsToPoints(el.pageX);
+      CGFloat localY = dotsToPoints(el.pageY);
+      if (el.type == ELEMENT_TEXT) {
+        drawSegment(el, localX, localY);
+      } else {
+        drawBitmapAt(el, localX, localY, dotsToPoints(el.width),
+                     dotsToPoints(el.height));
+      }
+
+      CGContextRestoreGState(context);
+      continue;
+    }
+
     if (el.type == ELEMENT_TEXT) {
       // At the first text segment of a line, offset the start position for
       // center/right justification based on the whole line width.
@@ -327,125 +522,11 @@
         currentLineMaxHeight = g_fontSize + 4;
       }
       atLineStart = true;
-      // Implementation of bitmap drawing
-      // Convert data if needed
-      std::vector<unsigned char> rasterData;
 
-      if (el.isColumnFormat) {
-        int xBytes = el.width / 8;
-        int yBytes = el.height / 8;
-
-        // Helper lambda for conversion
-        auto convert = [&](const std::vector<unsigned char> &src, int x,
-                           int y) {
-          int widthDots = x * 8;
-          int heightDots = y * 8;
-          int stride = x;
-          std::vector<unsigned char> dst(stride * heightDots, 0);
-
-          for (int col = 0; col < widthDots; col++) {
-            for (int vB = 0; vB < y; vB++) {
-              int srcIdx = col * y + vB;
-              if (srcIdx >= src.size())
-                break;
-
-              unsigned char b = src[srcIdx];
-              for (int bit = 0; bit < 8; bit++) {
-                bool isBlack = (b >> (7 - bit)) & 1;
-                if (isBlack) {
-                  int row = vB * 8 + bit;
-                  int dstIdx = row * stride + (col / 8);
-                  int dstBit = 7 - (col % 8);
-                  dst[dstIdx] |= (1 << dstBit);
-                }
-              }
-            }
-          }
-          return dst;
-        };
-
-        rasterData = convert(el.bitmapData, xBytes, yBytes);
-      } else {
-        rasterData = el.bitmapData;
-      }
-
-      // Check for empty data
-      if (rasterData.empty() || el.width <= 0 || el.height <= 0) {
-        y += el.height + 5;
-        continue;
-      }
-
-      // Invert data because using Black=0/White=1 color space trick or just use
-      // Mask? Raster data: 1 = Black, 0 = White. CGColorSpaceCreateDeviceGray:
-      // 0.0 = Black, 1.0 = White. If we use 1 bit per pixel: If bit is 1, value
-      // is max index -> 1 -> White? If bit is 0, value is min index -> 0 ->
-      // Black?
-
-      // Usually for 1bpp:
-      // We want 1 -> Black.
-      // We can use a decode array [1.0, 0.0] to swap.
-
-      CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceGray();
-      CFDataRef dataRef =
-          CFDataCreate(NULL, rasterData.data(), rasterData.size());
-      CGDataProviderRef provider = CGDataProviderCreateWithCFData(dataRef);
-
-      CGFloat decode[] = {1.0, 0.0}; // Invert: 0->1(White), 1->0(Black)
-
-      // bytesPerRow = ceil(width/8)
-      size_t bytesPerRow = (el.width + 7) / 8;
-
-      CGImageRef image =
-          CGImageCreate(el.width, el.height,
-                        1, // bitsPerComponent
-                        1, // bitsPerPixel
-                        bytesPerRow, colorSpace,
-                        kCGBitmapByteOrderDefault, // CGBitmapInfo
-                        provider, decode,
-                        false, // interpolate
-                        kCGRenderingIntentDefault);
-
-      if (image) {
-        // Draw image
-        // Context is flipped?
-        // PrinterView isFlipped returns YES. (0,0 is top-left).
-        // CGContextDrawImage draws with origin at bottom-left of the rect
-        // provided, but since the view is flipped, the coordinate system is
-        // y-down. However, CGImage is also defined with bottom-up data usually?
-        // If we draw it directly, it might be upside down.
-
-        // Let's draw it and see. The conversion logic assumes top-down raster
-        // (row 0 is top). If the View is flipped, drawing at (x,y,w,h) should
-        // place row 0 at y. Wait, CGContextDrawImage in a flipped context
-        // usually draws the image upside down relative to the context because
-        // the image coordinate system is y-up.
-
-        CGContextSaveGState(context);
-
-        // Apply justification (ESC a): center/right within the paper width
-        CGFloat drawX = alignStartX(el.width, el);
-
-        // Flip context for image drawing
-        CGContextTranslateCTM(context, 0, y + el.height);
-        CGContextScaleCTM(context, 1.0, -1.0);
-
-        // Draw at (drawX, 0, width, height) in the transformed space
-        // Wait, we translated to (0, y+h).
-        // So new (0,0) is at old (0, y+h).
-        // To draw from y to y+h:
-        // We want the bottom of the image at the bottom of the rect?
-
-        CGRect imageRect = CGRectMake(drawX, 0, el.width, el.height);
-        CGContextDrawImage(context, imageRect, image);
-
-        CGContextRestoreGState(context);
-
-        CGImageRelease(image);
-      }
-
-      CGDataProviderRelease(provider);
-      CFRelease(dataRef);
-      CGColorSpaceRelease(colorSpace);
+      // Apply justification (ESC a): center/right within the paper width.
+      // A dot maps 1:1 to a point here, as it does for ESC J feeds.
+      CGFloat drawX = alignStartX(el.width, el);
+      drawBitmapAt(el, drawX, y, el.width, el.height);
 
       y += el.height + 5;
     }

@@ -20,29 +20,22 @@ struct CmdParams {
 };
 
 static const CmdParams ESC_SKIP[] = {
-    {0x0C, 0}, // ESC FF   - print data in page mode
     {0x25, 1}, // ESC % n  - select/cancel user-defined character set
     {0x34, 0}, // ESC 4    - select italic (non-Epson) / user char set
     {0x35, 0}, // ESC 5    - cancel italic
     {0x3D, 1}, // ESC = n  - select peripheral device
     {0x3F, 1}, // ESC ? n  - cancel user-defined character
-    {0x4C, 0}, // ESC L    - select page mode
     {0x52, 1}, // ESC R n  - select international character set
-    {0x53, 0}, // ESC S    - select standard mode
-    {0x54, 1}, // ESC T n  - select print direction in page mode
-    {0x57, 8}, // ESC W ...- set print area in page mode
     {0x70, 3}, // ESC p m t1 t2 - generate cash drawer pulse
     {0x75, 1}, // ESC u n  - transmit peripheral device status
     {0x76, 0}, // ESC v    - transmit paper sensor status
 };
 
 static const CmdParams GS_SKIP[] = {
-    {0x24, 2}, // GS $ nL nH - absolute vertical position in page mode
     {0x3A, 0}, // GS :     - start/end macro definition
     {0x49, 1}, // GS I n   - transmit printer ID
     {0x50, 2}, // GS P x y - set motion units
     {0x54, 1}, // GS T n   - move to beginning of print line
-    {0x5C, 2}, // GS \ nL nH - relative vertical position in page mode
     {0x5E, 3}, // GS ^ r t m - execute macro
     {0x61, 1}, // GS a n   - enable/disable automatic status back
     {0x62, 1}, // GS b n   - turn smoothing on/off
@@ -124,6 +117,14 @@ VirtualPrinter::VirtualPrinter() {
     parenExpected = 0;
     qrModuleSize = 3;
     qrEcLevel = QR_ECC_LOW;
+    pageMode = false;
+    pageOriginX = 0;
+    pageOriginY = 0;
+    pageAreaW = 0;
+    pageAreaH = 0;
+    pageDirection = 0;
+    pageCursorX = 0;
+    pageCursorY = 0;
 }
 
 VirtualPrinter::~VirtualPrinter() {
@@ -156,6 +157,15 @@ void VirtualPrinter::Reset() {
     currentAlign = 0; // Left
     currentColumn = 0;
     tabStops.clear();
+    pageMode = false;
+    pageOriginX = 0;
+    pageOriginY = 0;
+    pageAreaW = 0;
+    pageAreaH = 0;
+    pageDirection = 0;
+    pageCursorX = 0;
+    pageCursorY = 0;
+    pageElements.clear();
     barcodeHeight = 162;
     barcodeModule = 3;
     barcodeHriPos = 0;
@@ -200,6 +210,15 @@ void VirtualPrinter::Clear() {
     currentAlign = 0; // Left
     currentColumn = 0;
     tabStops.clear();
+    pageMode = false;
+    pageOriginX = 0;
+    pageOriginY = 0;
+    pageAreaW = 0;
+    pageAreaH = 0;
+    pageDirection = 0;
+    pageCursorX = 0;
+    pageCursorY = 0;
+    pageElements.clear();
     barcodeHeight = 162;
     barcodeModule = 3;
     barcodeHriPos = 0;
@@ -228,19 +247,103 @@ void VirtualPrinter::ApplyStyle(PrinterElement &el) {
     el.align = currentAlign;
 }
 
+std::vector<PrinterElement>& VirtualPrinter::Target() {
+    return pageMode ? pageElements : elements;
+}
+
+int VirtualPrinter::CharWidthDots() const {
+    int base = (currentFont == FONT_B) ? 9 : (currentFont == FONT_C ? 8 : 12);
+    return base * widthScaleMode + charSpacingDots;
+}
+
+int VirtualPrinter::CharHeightDots() const {
+    int base = (currentFont == FONT_B) ? 17 : (currentFont == FONT_C ? 16 : 24);
+    return base * heightScaleMode;
+}
+
+int VirtualPrinter::PageFlowLength() const {
+    // Directions 1 and 3 print along the short axis of the print area, so the
+    // room available for a line of text is the area's height, not its width.
+    return (pageDirection == 1 || pageDirection == 3) ? pageAreaH : pageAreaW;
+}
+
+void VirtualPrinter::PushElement(PrinterElement& el) {
+    if (!pageMode) {
+        elements.push_back(el);
+        return;
+    }
+    // In page mode the element keeps the position it was printed at; the print
+    // position then moves past it, as it would on a real printer.
+    el.pageX = pageCursorX;
+    el.pageY = pageCursorY;
+    el.pageDir = pageDirection;
+    if (el.type == ELEMENT_TEXT) {
+        pageCursorX += (int)el.text.length() * CharWidthDots();
+    } else if (el.type == ELEMENT_BITMAP) {
+        pageCursorX += el.width;
+    }
+    pageElements.push_back(el);
+}
+
+void VirtualPrinter::EnterPageMode() {
+    if (pageMode) return; // ESC L in page mode does nothing
+    FlushSegment();
+    pageMode = true;
+    pageElements.clear();
+    pageCursorX = 0;
+    pageCursorY = 0;
+    currentColumn = 0;
+}
+
+void VirtualPrinter::LeavePageMode(bool print, bool stayInPageMode) {
+    if (!pageMode) return;
+    FlushSegment();
+    if (print && !pageElements.empty()) {
+        PrinterElement begin;
+        begin.type = ELEMENT_PAGE_BEGIN;
+        begin.pageX = pageOriginX;
+        begin.pageY = pageOriginY;
+        begin.width = pageAreaW;
+        begin.height = pageAreaH;
+        elements.push_back(begin);
+        elements.insert(elements.end(), pageElements.begin(), pageElements.end());
+
+        PrinterElement end;
+        end.type = ELEMENT_PAGE_END;
+        end.pageX = pageOriginX;
+        end.pageY = pageOriginY;
+        end.width = pageAreaW;
+        end.height = pageAreaH;
+        elements.push_back(end);
+    }
+    pageElements.clear();
+    pageCursorX = 0;
+    pageCursorY = 0;
+    currentColumn = 0;
+    pageMode = stayInPageMode;
+}
+
 void VirtualPrinter::FlushSegment() {
     if (!currentText.empty()) {
         PrinterElement el;
         el.type = ELEMENT_TEXT;
         el.text = currentText;
         ApplyStyle(el);
-        elements.push_back(el);
+        PushElement(el);
         currentText = L"";
     }
 }
 
 void VirtualPrinter::AddSetPos(int dots, bool absolute) {
     FlushSegment();
+    if (pageMode) {
+        // ESC $ / ESC \ move along the text flow of the current print
+        // direction; there is no element to emit, only a cursor move.
+        pageCursorX = absolute ? dots : pageCursorX + dots;
+        if (pageCursorX < 0) pageCursorX = 0;
+        currentColumn = 0;
+        return;
+    }
     PrinterElement el;
     el.type = ELEMENT_SETPOS;
     ApplyStyle(el);
@@ -251,6 +354,12 @@ void VirtualPrinter::AddSetPos(int dots, bool absolute) {
 
 void VirtualPrinter::AddFeed(int dots) {
     FlushSegment();
+    if (pageMode) {
+        pageCursorY += dots;
+        if (pageCursorY < 0) pageCursorY = 0;
+        currentColumn = 0;
+        return;
+    }
     PrinterElement el;
     el.type = ELEMENT_FEED;
     ApplyStyle(el);
@@ -261,6 +370,15 @@ void VirtualPrinter::AddFeed(int dots) {
 
 void VirtualPrinter::AddNewLine() {
     FlushSegment();
+    if (pageMode) {
+        // A line feed in page mode moves down one line inside the print area
+        // and back to the start of the line; nothing is printed yet.
+        pageCursorY += (currentLineSpacing >= 0) ? currentLineSpacing
+                                                 : CharHeightDots();
+        pageCursorX = 0;
+        currentColumn = 0;
+        return;
+    }
     PrinterElement el;
     el.type = ELEMENT_NEWLINE;
     // Store current line spacing if fixed, else 0/default
@@ -274,6 +392,8 @@ void VirtualPrinter::AddNewLine() {
 }
 
 void VirtualPrinter::AddCutLine() {
+    // Cutting is not available in page mode; real printers ignore the command.
+    if (pageMode) return;
     FlushSegment();
     PrinterElement el;
     el.type = ELEMENT_CUT;
@@ -307,14 +427,31 @@ void VirtualPrinter::CommitEscStarBand() {
     // line, each followed by a line feed. Merge a new band with the immediately
     // preceding band (separated only by that single feed) so the image renders
     // as one contiguous bitmap instead of being sliced by line spacing.
-    if (elements.size() >= 2 && elements.back().type == ELEMENT_NEWLINE) {
-        PrinterElement& prev = elements[elements.size() - 2];
+    std::vector<PrinterElement>& target = Target();
+    if (!pageMode && target.size() >= 2 &&
+        target.back().type == ELEMENT_NEWLINE) {
+        PrinterElement& prev = target[target.size() - 2];
         if (prev.type == ELEMENT_BITMAP && prev.mergeableBand &&
             !prev.isColumnFormat && prev.width == columns) {
-            elements.pop_back(); // drop the inter-band newline
+            target.pop_back(); // drop the inter-band newline
             prev.bitmapData.insert(prev.bitmapData.end(), raster.begin(),
                                    raster.end());
             prev.height += bandHeight;
+            return;
+        }
+    }
+    if (pageMode && !target.empty()) {
+        // In page mode the bands are not separated by a newline element, so
+        // stack them when the next one starts on the line below.
+        PrinterElement& prev = target.back();
+        if (prev.type == ELEMENT_BITMAP && prev.mergeableBand &&
+            !prev.isColumnFormat && prev.width == columns &&
+            prev.pageX == 0 && pageCursorX == 0 &&
+            prev.pageY + prev.height <= pageCursorY) {
+            prev.bitmapData.insert(prev.bitmapData.end(), raster.begin(),
+                                   raster.end());
+            prev.height += bandHeight;
+            pageCursorY = prev.pageY + prev.height;
             return;
         }
     }
@@ -327,7 +464,7 @@ void VirtualPrinter::CommitEscStarBand() {
     el.isColumnFormat = false; // already converted to raster above
     el.mergeableBand = true;
     el.align = currentAlign; // Justification active when the band began
-    elements.push_back(el);
+    PushElement(el);
 }
 
 void VirtualPrinter::CommitBarcode() {
@@ -378,7 +515,7 @@ void VirtualPrinter::CommitBarcode() {
     el.height = height;
     el.isColumnFormat = false;
     el.align = currentAlign;
-    elements.push_back(el);
+    PushElement(el);
 
     if (hriBelow && !hri.empty()) {
         currentText.assign(hri.begin(), hri.end());
@@ -400,7 +537,7 @@ void VirtualPrinter::AddBitmapElement(const std::vector<unsigned char> &raster,
     el.width = widthDots;
     el.height = heightDots;
     el.isColumnFormat = false;
-    elements.push_back(el);
+    PushElement(el);
 }
 
 void VirtualPrinter::CommitQRCode() {
@@ -647,6 +784,19 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 else if (b == 0x09) { // HT - horizontal tab
                     HandleTab();
                 }
+                else if (b == 0x0C) { // FF - print the page and leave page mode
+                    // In standard mode FF only matters on label printers
+                    // (feed to the next black mark), so it is ignored there.
+                    LeavePageMode(true);
+                }
+                else if (b == 0x18) { // CAN - discard the page mode buffer
+                    if (pageMode) {
+                        currentText = L"";
+                        pageElements.clear();
+                        pageCursorX = 0;
+                        pageCursorY = 0;
+                    }
+                }
                 else if (b == 0x10) { // DLE - real-time commands
                     state = STATE_DLE;
                 }
@@ -665,10 +815,22 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     // Included handled: 0x0A (LF), 0x0D (CR), 0x1B (ESC), 0x1D (GS)
                     // We should definitely ignore 0x00 (NUL)
                     if (b >= 0x20 || (b > 0x7F && b != 0xFF)) { // 0x80+ are extended chars. 0xFF often ignored?
+                         // In page mode a character that would stick out of the
+                         // print area moves to the next line inside the area
+                         // instead of being printed outside it.
+                         int flowLen = pageMode ? PageFlowLength() : 0;
+                         if (flowLen > 0) {
+                             int used = pageCursorX +
+                                 ((int)currentText.length() + 1) * CharWidthDots();
+                             if (used > flowLen && (pageCursorX > 0 || !currentText.empty())) {
+                                 AddNewLine();
+                             }
+                         }
                          currentText += MapCodePageChar(b, currentCodePage);
                          currentColumn++;
-                         // Auto-CRLF if maxColumns is set
-                         if (maxColumns > 0 && currentColumn >= maxColumns) {
+                         // Auto-CRLF if maxColumns is set (standard mode only:
+                         // in page mode the print area does the wrapping)
+                         if (!pageMode && maxColumns > 0 && currentColumn >= maxColumns) {
                              AddNewLine();
                          }
                     }
@@ -677,6 +839,14 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
 
             case STATE_ESC:
                 if (b == 0x40) { // @ Initialize
+                    // ESC @ cancels page mode; anything buffered for the page
+                    // is discarded, exactly as on a real printer.
+                    LeavePageMode(false);
+                    pageOriginX = 0;
+                    pageOriginY = 0;
+                    pageAreaW = 0;
+                    pageAreaH = 0;
+                    pageDirection = 0;
                     // Reset formatting modes only. On a real printer ESC @ does
                     // NOT erase already-printed paper, so we must not clear
                     // `elements` here: legacy jobs send ESC @ mid-stream (to
@@ -788,6 +958,26 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 }
                 else if (b == 0x65) { // e - Print and reverse feed n lines
                     state = STATE_ESC_e;
+                }
+                else if (b == 0x4C) { // L - Select page mode
+                    EnterPageMode();
+                    state = STATE_NORMAL;
+                }
+                else if (b == 0x53) { // S - Select standard mode
+                    // Leaving page mode this way throws the page buffer away.
+                    LeavePageMode(false);
+                    state = STATE_NORMAL;
+                }
+                else if (b == 0x0C) { // FF - print the page, stay in page mode
+                    LeavePageMode(true, true);
+                    state = STATE_NORMAL;
+                }
+                else if (b == 0x54) { // T - Select print direction in page mode
+                    state = STATE_ESC_T;
+                }
+                else if (b == 0x57) { // W - Set print area in page mode
+                    pendingParams.clear();
+                    state = STATE_ESC_W;
                 }
                 else {
                     int params = LookupParams(ESC_SKIP,
@@ -923,6 +1113,81 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 AddFeed(-(int)b * (currentLineSpacing >= 0 ? currentLineSpacing : 30));
                 state = STATE_NORMAL;
                 break;
+
+            case STATE_ESC_T:
+                // ESC T n - print direction in page mode: 0/48 left to right,
+                // 1/49 bottom to top, 2/50 right to left, 3/51 top to bottom.
+                // Changing direction moves the print position back to the
+                // starting corner of the print area.
+                FlushSegment();
+                if (b >= 48) pageDirection = (b - 48) & 0x03;
+                else         pageDirection = b & 0x03;
+                pageCursorX = 0;
+                pageCursorY = 0;
+                currentColumn = 0;
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_ESC_W:
+                // ESC W xL xH yL yH dxL dxH dyL dyH - print area in page mode.
+                pendingParams.push_back(b);
+                if (pendingParams.size() >= 8) {
+                    int x  = pendingParams[0] + pendingParams[1] * 256;
+                    int yy = pendingParams[2] + pendingParams[3] * 256;
+                    int dx = pendingParams[4] + pendingParams[5] * 256;
+                    int dy = pendingParams[6] + pendingParams[7] * 256;
+                    pendingParams.clear();
+                    // A zero-sized area is an invalid request and is ignored.
+                    if (dx > 0 && dy > 0) {
+                        FlushSegment();
+                        pageOriginX = x;
+                        pageOriginY = yy;
+                        pageAreaW = dx;
+                        pageAreaH = dy;
+                        pageCursorX = 0;
+                        pageCursorY = 0;
+                        currentColumn = 0;
+                    }
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_GS_DOLLAR_nL:
+                pendingParam = b;
+                state = STATE_GS_DOLLAR_nH;
+                break;
+
+            case STATE_GS_DOLLAR_nH:
+                // GS $ nL nH - absolute vertical print position inside the page
+                // area; it has no effect outside page mode.
+                FlushSegment();
+                if (pageMode) {
+                    pageCursorY = pendingParam + b * 256;
+                    currentColumn = 0;
+                }
+                state = STATE_NORMAL;
+                break;
+
+            case STATE_GS_BSLASH_nL:
+                pendingParam = b;
+                state = STATE_GS_BSLASH_nH;
+                break;
+
+            case STATE_GS_BSLASH_nH:
+            {
+                // GS \ nL nH - relative vertical move; the 16-bit value is
+                // signed, so large values move back up the page.
+                FlushSegment();
+                int offset = pendingParam + b * 256;
+                if (offset > 32767) offset -= 65536;
+                if (pageMode) {
+                    pageCursorY += offset;
+                    if (pageCursorY < 0) pageCursorY = 0;
+                    currentColumn = 0;
+                }
+                state = STATE_NORMAL;
+                break;
+            }
 
             case STATE_GS_L_nL:
                 pendingParam = b;
@@ -1095,6 +1360,12 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                 else if (b == 0x57) { // W Set print area width
                     state = STATE_GS_W_nL;
                 }
+                else if (b == 0x24) { // $ Absolute vertical position (page mode)
+                    state = STATE_GS_DOLLAR_nL;
+                }
+                else if (b == 0x5C) { // \ Relative vertical position (page mode)
+                    state = STATE_GS_BSLASH_nL;
+                }
                 else {
                     int params = LookupParams(GS_SKIP,
                                               sizeof(GS_SKIP) / sizeof(GS_SKIP[0]), b);
@@ -1180,8 +1451,8 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     el.height = bitmapHeightDots;
                     el.isColumnFormat = false; // Raster format (GS v 0)
                     el.align = currentAlign;
-                    elements.push_back(el);
-                    
+                    PushElement(el);
+
                     state = STATE_NORMAL;
                 }
                 break;
@@ -1209,7 +1480,7 @@ void VirtualPrinter::ProcessData(const unsigned char* data, int length) {
                     el.isColumnFormat = true; // Column format (GS *)
                     el.align = currentAlign;
 
-                    elements.push_back(el);
+                    PushElement(el);
                 }
                 
                 state = STATE_NORMAL;
@@ -1542,14 +1813,44 @@ std::vector<PrinterElement> VirtualPrinter::GetElements() {
     std::lock_guard<std::mutex> lock(mutex);
     std::vector<PrinterElement> result = elements;
 
-    // Append pending text as a temporary element so it's visible
+    PrinterElement pending;
+    bool hasPending = false;
     if (!currentText.empty()) {
-        PrinterElement el;
-        el.type = ELEMENT_TEXT;
-        el.text = currentText;
-        ApplyStyle(el);
-        result.push_back(el);
+        pending.type = ELEMENT_TEXT;
+        pending.text = currentText;
+        ApplyStyle(pending);
+        hasPending = true;
     }
+
+    if (pageMode && (!pageElements.empty() || hasPending)) {
+        // The page has not been printed yet (no FF), but showing it as it fills
+        // up is more useful than showing nothing at all.
+        PrinterElement begin;
+        begin.type = ELEMENT_PAGE_BEGIN;
+        begin.pageX = pageOriginX;
+        begin.pageY = pageOriginY;
+        begin.width = pageAreaW;
+        begin.height = pageAreaH;
+        result.push_back(begin);
+        result.insert(result.end(), pageElements.begin(), pageElements.end());
+        if (hasPending) {
+            pending.pageX = pageCursorX;
+            pending.pageY = pageCursorY;
+            pending.pageDir = pageDirection;
+            result.push_back(pending);
+        }
+        PrinterElement end;
+        end.type = ELEMENT_PAGE_END;
+        end.pageX = pageOriginX;
+        end.pageY = pageOriginY;
+        end.width = pageAreaW;
+        end.height = pageAreaH;
+        result.push_back(end);
+        return result;
+    }
+
+    // Append pending text as a temporary element so it's visible
+    if (hasPending) result.push_back(pending);
 
     return result;
 }

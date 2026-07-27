@@ -482,7 +482,11 @@ static void DrawTextSegment(HDC hdc, const PrinterElement& el, int x, int y,
             xf.eM21 = -1.0f; xf.eM22 = 0.0f;
             xf.eDx = (FLOAT)(x + (int)i * cell + glyphHeight);
             xf.eDy = (FLOAT)y;
-            SetWorldTransform(hdc, &xf);
+            // Compose rather than replace: in page mode the caller has already
+            // set a transform that maps the page onto the paper.
+            XFORM composed;
+            CombineTransform(&composed, &xf, &saved);
+            SetWorldTransform(hdc, &composed);
             TextOut(hdc, 0, 0, &el.text[i], 1);
         }
         SetWorldTransform(hdc, &saved);
@@ -497,6 +501,149 @@ static void DrawTextSegment(HDC hdc, const PrinterElement& el, int x, int y,
     if (outSize) {
         outSize->cx = extent.cx;
         outSize->cy = ElementFontHeight(el, fontSize);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page mode (ESC L)
+//
+// Elements between ELEMENT_PAGE_BEGIN and ELEMENT_PAGE_END do not flow: each
+// one carries the position it was printed at inside the print area, in the
+// coordinate system of the print direction selected by ESC T. Placing them is
+// therefore a matter of mapping those page coordinates onto the paper, which a
+// world transform does for all four directions at once - including the glyph
+// rotation the printer applies to directions 1 to 3.
+// ---------------------------------------------------------------------------
+
+// GDI realizes a font at the moment it is selected into the DC, transform
+// included, and selecting the font that is already current is a no-op. So a
+// world transform set (or restored) after the selection leaves the glyphs
+// turned the way the previous transform had them - text printed after a page
+// in direction 1 to 3 would come out rotated. Toggling through a stock font
+// forces the font to be realized again under the transform now in force.
+static void RefreshDCFont(HDC hdc, HFONT font) {
+    SelectObject(hdc, GetStockObject(SYSTEM_FONT));
+    SelectObject(hdc, font);
+}
+
+// Maps page-local pixels (x along the text flow, y across the lines) onto the
+// device, given the print area box (px, py, pw, ph) in device pixels.
+static XFORM PageTransform(int dir, int px, int py, int pw, int ph) {
+    XFORM xf;
+    switch (dir) {
+    case 1: // bottom to top, starting at the lower-left corner
+        xf.eM11 =  0.0f; xf.eM12 = -1.0f; xf.eM21 =  1.0f; xf.eM22 =  0.0f;
+        xf.eDx = (FLOAT)px;        xf.eDy = (FLOAT)(py + ph);
+        break;
+    case 2: // right to left, starting at the lower-right corner
+        xf.eM11 = -1.0f; xf.eM12 =  0.0f; xf.eM21 =  0.0f; xf.eM22 = -1.0f;
+        xf.eDx = (FLOAT)(px + pw); xf.eDy = (FLOAT)(py + ph);
+        break;
+    case 3: // top to bottom, starting at the upper-right corner
+        xf.eM11 =  0.0f; xf.eM12 =  1.0f; xf.eM21 = -1.0f; xf.eM22 =  0.0f;
+        xf.eDx = (FLOAT)(px + pw); xf.eDy = (FLOAT)py;
+        break;
+    default: // 0: left to right, starting at the upper-left corner
+        xf.eM11 =  1.0f; xf.eM12 =  0.0f; xf.eM21 =  0.0f; xf.eM22 =  1.0f;
+        xf.eDx = (FLOAT)px;        xf.eDy = (FLOAT)py;
+        break;
+    }
+    return xf;
+}
+
+// Pixel size of a text or bitmap element. Bitmaps are scaled like every other
+// page coordinate so that a dot keeps the same size everywhere on the page.
+static void MeasureElementBox(HDC hdc, const PrinterElement& el, int fontSize,
+                              int charWidth, HFONT hFontNormal, int* outW, int* outH) {
+    if (el.type == ELEMENT_BITMAP) {
+        *outW = DotsToPixels(el.width, charWidth);
+        *outH = DotsToPixels(el.height, charWidth);
+        return;
+    }
+    if (el.isRotated90) {
+        *outW = RotatedCellWidth(el, fontSize, charWidth) * (int)el.text.length();
+        *outH = ElementFontHeight(el, fontSize);
+        return;
+    }
+    bool del = false;
+    HFONT f = SelectElementFont(el, fontSize, charWidth, hFontNormal, &del);
+    HGDIOBJ old = SelectObject(hdc, f);
+    SetTextCharacterExtra(hdc, ElementCharExtra(el, charWidth));
+    SIZE size;
+    GetTextExtentPoint32(hdc, el.text.c_str(), (int)el.text.length(), &size);
+    SetTextCharacterExtra(hdc, 0);
+    SelectObject(hdc, old);
+    if (del) DeleteObject(f);
+    *outW = size.cx;
+    *outH = ElementFontHeight(el, fontSize);
+}
+
+// How much of the paper the page needs, in pixels, when ESC W did not state a
+// height. Directions 1 and 3 print along the paper's vertical axis, so there it
+// is the text flow that decides how far down the page reaches.
+static int MeasurePageContentHeight(HDC hdc, const std::vector<PrinterElement>& elements,
+                                    size_t startIdx, int fontSize, int charWidth,
+                                    HFONT hFontNormal) {
+    int needed = 0;
+    for (size_t i = startIdx; i < elements.size(); ++i) {
+        const PrinterElement& el = elements[i];
+        if (el.type == ELEMENT_PAGE_END) break;
+        if (el.type != ELEMENT_TEXT && el.type != ELEMENT_BITMAP) continue;
+        int w = 0, h = 0;
+        MeasureElementBox(hdc, el, fontSize, charWidth, hFontNormal, &w, &h);
+        int extent = (el.pageDir == 1 || el.pageDir == 3)
+                         ? DotsToPixels(el.pageX, charWidth) + w
+                         : DotsToPixels(el.pageY, charWidth) + h;
+        if (extent > needed) needed = extent;
+    }
+    return needed;
+}
+
+// Draws an element bitmap with its top-left corner at (x, y). Page mode has to
+// go through StretchDIBits: SetDIBitsToDevice takes device coordinates and so
+// would ignore the transform that positions and rotates the page.
+static void DrawBitmapElement(HDC hdc, const PrinterElement& el, int x, int y,
+                              int destW, int destH, bool transformed) {
+    int w = el.width;   // dots
+    int h = el.height;  // dots
+    if (w <= 0 || h <= 0) return;
+    int wBytes = (w + 7) / 8;
+
+    struct {
+        BITMAPINFOHEADER bmiHeader;
+        RGBQUAD bmiColors[2];
+    } bmi = {0};
+
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // Top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 1;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    // Palette: 0 = White, 1 = Black
+    bmi.bmiColors[0] = { 255, 255, 255, 0 };
+    bmi.bmiColors[1] = { 0, 0, 0, 0 };
+
+    std::vector<unsigned char> actualData;
+    if (el.isColumnFormat) {
+        // Convert GS * format to Raster
+        actualData = ConvertColumnToRaster(el.bitmapData, w / 8, h / 8);
+    } else {
+        actualData = el.bitmapData;
+    }
+
+    std::vector<unsigned char> dibData = ConvertToDIB(actualData, wBytes, h);
+
+    if (transformed) {
+        int oldMode = SetStretchBltMode(hdc, HALFTONE);
+        SetBrushOrgEx(hdc, 0, 0, NULL);
+        StretchDIBits(hdc, x, y, destW, destH, 0, 0, w, h,
+                      dibData.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS, SRCCOPY);
+        SetStretchBltMode(hdc, oldMode);
+    } else {
+        SetDIBitsToDevice(hdc, x, y, w, h, 0, 0, 0, h,
+                          dibData.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS);
     }
 }
 
@@ -856,9 +1003,94 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return startX;
         };
 
+        // Page mode state: the box the current page occupies on the paper and
+        // the DC state saved while it is being drawn (the page is clipped to
+        // its print area, as a real printer clips it).
+        bool inPage = false;
+        int pageLeftPx = 0, pageTopPx = 0, pageWPx = 0, pageHPx = 0;
+        int pageSavedDC = 0;
+
         bool atLineStart = true;
         for (size_t idx = 0; idx < elements.size(); ++idx) {
             const PrinterElement& el = elements[idx];
+
+            if (el.type == ELEMENT_PAGE_BEGIN) {
+                if (!atLineStart) {
+                    y += currentLineMaxHeight + 4;
+                    currentLineMaxHeight = g_fontSize + 4;
+                }
+                currentX = leftMargin;
+                atLineStart = true;
+
+                // One scale on both axes, so a page turned by ESC T keeps its
+                // shape; the horizontal one is used since text is laid out on
+                // the character grid.
+                pageLeftPx = leftMargin + DotsToPixels(el.pageX, charWidth);
+                pageTopPx = y + DotsToPixels(el.pageY, charWidth);
+                pageWPx = DotsToPixels(el.width, charWidth);
+                pageHPx = DotsToPixels(el.height, charWidth);
+                if (pageWPx <= 0) {
+                    pageWPx = (paperWidth > 0) ? paperWidth
+                                               : rect.right - pageLeftPx - leftMargin;
+                }
+                if (pageHPx <= 0) {
+                    // ESC W never ran, so there is no stated page height: take
+                    // only as much paper as the content needs.
+                    pageHPx = MeasurePageContentHeight(hdc, elements, idx + 1,
+                                                       g_fontSize, charWidth, hFontNormal);
+                }
+                if (pageWPx < 1) pageWPx = 1;
+                if (pageHPx < 1) pageHPx = 1;
+
+                pageSavedDC = SaveDC(hdc);
+                IntersectClipRect(hdc, pageLeftPx, pageTopPx,
+                                  pageLeftPx + pageWPx + 1, pageTopPx + pageHPx + 1);
+                inPage = true;
+                continue;
+            }
+
+            if (el.type == ELEMENT_PAGE_END) {
+                if (pageSavedDC) {
+                    RestoreDC(hdc, pageSavedDC);
+                    pageSavedDC = 0;
+                    RefreshDCFont(hdc, hFontNormal);
+                }
+                // The printer feeds the whole print area, whether it was filled
+                // or not, so the next line starts below the page.
+                y = pageTopPx + pageHPx;
+                inPage = false;
+                currentX = leftMargin;
+                atLineStart = true;
+                currentLineMaxHeight = g_fontSize + 4;
+                continue;
+            }
+
+            if (inPage) {
+                if (el.type != ELEMENT_TEXT && el.type != ELEMENT_BITMAP) continue;
+
+                XFORM saved;
+                GetWorldTransform(hdc, &saved);
+                XFORM xf = PageTransform(el.pageDir, pageLeftPx, pageTopPx,
+                                         pageWPx, pageHPx);
+                SetWorldTransform(hdc, &xf);
+                RefreshDCFont(hdc, hFontNormal);
+
+                int localX = DotsToPixels(el.pageX, charWidth);
+                int localY = DotsToPixels(el.pageY, charWidth);
+                if (el.type == ELEMENT_TEXT) {
+                    DrawTextSegment(hdc, el, localX, localY, g_fontSize, charWidth,
+                                    hFontNormal, NULL);
+                } else {
+                    DrawBitmapElement(hdc, el, localX, localY,
+                                      DotsToPixels(el.width, charWidth),
+                                      DotsToPixels(el.height, charWidth), true);
+                }
+
+                SetWorldTransform(hdc, &saved);
+                RefreshDCFont(hdc, hFontNormal);
+                continue;
+            }
+
             if (el.type == ELEMENT_TEXT) {
                 // At the first text segment of a line, offset the start position
                 // for center/right justification based on the whole line width.
@@ -969,53 +1201,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
                 atLineStart = true;
 
-                int w = el.width; // dots
                 int h = el.height; // dots
-                int wBytes = (w + 7) / 8;
-
-                // GDI Bitmap Info
-                struct {
-                    BITMAPINFOHEADER bmiHeader;
-                    RGBQUAD bmiColors[2];
-                } bmi = {0};
-
-                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = w;
-                bmi.bmiHeader.biHeight = -h; // Top-down
-                bmi.bmiHeader.biPlanes = 1;
-                bmi.bmiHeader.biBitCount = 1;
-                bmi.bmiHeader.biCompression = BI_RGB;
-                
-                // Palette: 0 = White, 1 = Black
-                bmi.bmiColors[0] = { 255, 255, 255, 0 };
-                bmi.bmiColors[1] = { 0, 0, 0, 0 };
-
-                // Handle Column-Format conversion if needed
-                std::vector<unsigned char> actualData;
-                if (el.isColumnFormat) {
-                    // Convert GS * format to Raster
-                    int xBytes = w / 8;
-                    int yBytes = h / 8;
-                    actualData = ConvertColumnToRaster(el.bitmapData, xBytes, yBytes);
-                } else {
-                    actualData = el.bitmapData;
-                }
-
-                // Convert data to padded DIB format
-                std::vector<unsigned char> dibData = ConvertToDIB(actualData, wBytes, h);
 
                 // Apply justification (ESC a): center/right within the paper width
-                int drawX = alignStartX(w, el);
+                int drawX = alignStartX(el.width, el);
 
-                SetDIBitsToDevice(hdc, drawX, y, w, h,
-                    0, 0, 0, h,
-                    dibData.data(), (BITMAPINFO*)&bmi, DIB_RGB_COLORS);
+                DrawBitmapElement(hdc, el, drawX, y, el.width, h, false);
 
                 y += h;
                 y += 5; // spacing
                 currentX = leftMargin;
             }
         }
+
+        if (pageSavedDC) RestoreDC(hdc, pageSavedDC); // page left open by a truncated stream
 
         SelectObject(hdc, oldPen);
         SelectObject(hdc, oldFont);
