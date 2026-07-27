@@ -191,6 +191,18 @@ void RepaintCallback(void *param) {
     frame = NSRectFromString([defaults stringForKey:@"WindowFrame"]);
   }
 
+  // Validate screen bounds so window is never restored off-screen
+  NSRect screenFrame = [[NSScreen mainScreen] visibleFrame];
+  if (NSIsEmptyRect(frame) || frame.size.width < 100 || frame.size.height < 100 ||
+      frame.origin.x > screenFrame.origin.x + screenFrame.size.width ||
+      frame.origin.y > screenFrame.origin.y + screenFrame.size.height ||
+      frame.origin.x + frame.size.width < screenFrame.origin.x ||
+      frame.origin.y + frame.size.height < screenFrame.origin.y) {
+    frame = NSMakeRect(screenFrame.origin.x + (screenFrame.size.width - 500) / 2,
+                       screenFrame.origin.y + (screenFrame.size.height - 700) / 2,
+                       500, 700);
+  }
+
   NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                      NSWindowStyleMaskResizable |
                      NSWindowStyleMaskMiniaturizable;
@@ -204,9 +216,14 @@ void RepaintCallback(void *param) {
                                     g_port]];
   self.window.delegate = self;
 
+  // Prevent floating window from hiding when app loses focus
+  [self.window setHidesOnDeactivate:NO];
+
   // Apply always on top setting
   if (g_alwaysOnTop) {
     [self.window setLevel:NSFloatingWindowLevel];
+  } else {
+    [self.window setLevel:NSNormalWindowLevel];
   }
 
   // View Setup
@@ -226,7 +243,10 @@ void RepaintCallback(void *param) {
     [self.window center];
   }
 
+  [self.window setCanHide:NO];
+  [self.window setIsVisible:YES];
   [self.window makeKeyAndOrderFront:nil];
+  [self.window orderFrontRegardless];
   [NSApp activateIgnoringOtherApps:YES];
 
   // Setup Printer
@@ -250,6 +270,11 @@ void RepaintCallback(void *param) {
   return NO; // Keep running with status bar icon when window is closed
 }
 
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+  [self restoreWindow:nil];
+  return YES;
+}
+
 // NSWindowDelegate - intercept minimize to hide to status bar instead of Dock
 - (BOOL)windowShouldMiniaturize:(NSWindow *)window {
   [window orderOut:nil];
@@ -259,7 +284,11 @@ void RepaintCallback(void *param) {
 // Actions
 
 - (void)restoreWindow:(id)sender {
+  [self.window setCanHide:NO];
+  [self.window setIsVisible:YES];
+  [self.window deminiaturize:nil];
   [self.window makeKeyAndOrderFront:nil];
+  [self.window orderFrontRegardless];
   [NSApp activateIgnoringOtherApps:YES];
 }
 
@@ -267,8 +296,10 @@ void RepaintCallback(void *param) {
   g_alwaysOnTop = !g_alwaysOnTop;
   self.alwaysOnTopItem.state =
       g_alwaysOnTop ? NSControlStateValueOn : NSControlStateValueOff;
+  [self.window setHidesOnDeactivate:NO];
   [self.window
       setLevel:g_alwaysOnTop ? NSFloatingWindowLevel : NSNormalWindowLevel];
+  [self.window orderFrontRegardless];
   [self saveSettings];
 }
 
