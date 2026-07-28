@@ -32,8 +32,8 @@ const int DOTS_PER_CHAR = 12;
 
 // Character font selected by ESC M n.
 enum PrinterFont {
-  FONT_A = 0, // 12x24 - the default
-  FONT_B = 1, // 9x17
+  FONT_A = 0, // 12x24 - the default, 48 columns on 80 mm paper
+  FONT_B = 1, // 10x24 - the narrow one, 57 columns, on a cell as tall as A's
   FONT_C = 2  // smaller still on the models that offer it
 };
 

@@ -15,7 +15,8 @@ echo Compiling VirtualESCPOS...
 cl /nologo /EHsc /std:c++17 /MT /utf-8 /D_CRT_SECURE_NO_WARNINGS ^
     /DWINVER=0x0601 /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000 ^
     /D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR ^
-    main.cpp VirtualPrinter.cpp Barcode.cpp CodePages.cpp QRCode.cpp Network.cpp version.res ^
+    main.cpp VirtualPrinter.cpp Barcode.cpp CodePages.cpp QRCode.cpp Network.cpp ^
+    FontA12x24.cpp FontB10x24.cpp version.res ^
     User32.lib Gdi32.lib Ws2_32.lib Advapi32.lib Shell32.lib Comdlg32.lib ^
     /Fe:bin\VirtualESCPOS.exe ^
     /link /SUBSYSTEM:WINDOWS,"5.01"

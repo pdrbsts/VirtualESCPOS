@@ -11,6 +11,8 @@
 #include <string>
 #include <sstream>
 #include "VirtualPrinter.h"
+#include "FontA12x24.h"
+#include "FontB10x24.h"
 #include "Network.h"
 
 // Registry key path
@@ -65,11 +67,13 @@ float scale = 1.0f; // Zoom factor, maybe?
 // Settings
 int g_porta = 9100;
 int g_colunas = 0;
-int g_fontSize = 16;
+// The Font A cell is 12x24, so 24 draws it dot for dot: one pixel per dot, and
+// 48 columns across the 576 dots of 80 mm paper. Other sizes scale the matrix.
+int g_fontSize = 24;
 // Window settings defaults
 int g_winX = CW_USEDEFAULT;
 int g_winY = CW_USEDEFAULT;
-int g_winW = 500;
+int g_winW = 530;
 int g_winH = 700;
 bool g_winMax = false;
 bool g_alwaysOnTop = false;
@@ -328,20 +332,43 @@ std::vector<unsigned char> ConvertToDIB(const std::vector<unsigned char>& src, i
     return dib;
 }
 
-// Glyph height of each ESC/POS font relative to the configured base size:
-// Font A is 12x24, Font B 9x17 and Font C smaller still (ESC M n).
-static double FontHeightFactor(int font) {
-    if (font == FONT_B) return 17.0 / 24.0;
-    if (font == FONT_C) return 16.0 / 24.0;
-    return 1.0;
+// The dot cell of each font ESC M n can select, and the table its dots come
+// from. Font A (12x24) and Font B (10x24) each have their own matrix; Font C
+// has no table of its own, so it is Font A's shrunk to the 8x16 cell - which
+// is the same cell the parser counts columns with.
+struct FontCell {
+    const unsigned short* (*glyph)(wchar_t); // the ROM table
+    int srcW, srcH;                          // the cell that table is drawn on
+    int cellW, cellH;                        // the cell on the paper, in dots
+};
+
+static FontCell FontCellFor(int font) {
+    if (font == FONT_B) {
+        return { FontBGlyph, FONT_B_WIDTH, FONT_B_HEIGHT, FONT_B_WIDTH, FONT_B_HEIGHT };
+    }
+    if (font == FONT_C) {
+        return { FontAGlyph, FONT_A_WIDTH, FONT_A_HEIGHT, 8, 16 };
+    }
+    return { FontAGlyph, FONT_A_WIDTH, FONT_A_HEIGHT, FONT_A_WIDTH, FONT_A_HEIGHT };
 }
 
 // Height in pixels of one text element, i.e. the selected font scaled by the
-// vertical multiplier from ESC ! / GS !.
+// vertical multiplier from ESC ! / GS !. The size the user sets is the height
+// of the Font A cell, so the other fonts follow from the ratio of the cells:
+// Font B is as tall as Font A, Font C two thirds of it.
 static int ElementFontHeight(const PrinterElement& el, int fontSize) {
-    int baseHeight = (int)(fontSize * FontHeightFactor(el.font) + 0.5);
+    int baseHeight = MulDiv(fontSize, FontCellFor(el.font).cellH, FONT_A_HEIGHT);
     if (baseHeight < 1) baseHeight = 1;
     return baseHeight * el.heightScale;
+}
+
+// Width of the Font A cell for a given text size. The cell is 12 dots wide and
+// 24 tall, so the size the user sets is its height and the width follows: at 24
+// one dot is one pixel and 48 columns come to the 576 pixels an 80 mm receipt
+// prints at 203 dpi.
+static int CellWidthForSize(int fontSize) {
+    int w = MulDiv(fontSize, FONT_A_WIDTH, FONT_A_HEIGHT);
+    return w < 1 ? 1 : w;
 }
 
 // Converts an ESC/POS horizontal coordinate (dots) into pixels. Text is laid
@@ -350,33 +377,18 @@ static int DotsToPixels(int dots, int charWidth) {
     return MulDiv(dots, charWidth, DOTS_PER_CHAR);
 }
 
-// Natural (unscaled) glyph width of an element's font, in pixels.
+// Natural (unscaled) cell width of an element's font, in pixels: the Font A
+// cell narrowed in the ratio of the two cells, so Font B comes out 10 dots
+// wide where Font A is 12 - which is what puts 57 columns on the line.
 static int ElementNaturalWidth(const PrinterElement& el, int charWidth) {
-    int w = (int)(charWidth * FontHeightFactor(el.font) + 0.5);
+    int w = MulDiv(charWidth, FontCellFor(el.font).cellW, FONT_A_WIDTH);
     return w < 1 ? 1 : w;
 }
 
-// Returns the font to use for a text element, matching the draw path. If a
-// special font was created, sets *deleteFont so the caller can DeleteObject it.
-static HFONT SelectElementFont(const PrinterElement& el, int fontSize, int charWidth, HFONT hFontNormal, bool* deleteFont) {
-    *deleteFont = false;
-    if (el.font == FONT_A && el.widthScale == 1 && el.heightScale == 1 &&
-        !el.isUnderline && !el.isBold && !el.isRotated90) {
-        return hFontNormal;
-    }
-    int fnHeight = ElementFontHeight(el, fontSize);
-    // The width has to be stated explicitly. Left at 0, GDI widens the glyphs
-    // in proportion to the height, but ESC/POS scales the two axes separately
-    // (GS ! can ask for 1x tall and 4x wide, or the other way round).
-    int fnWidth = ElementNaturalWidth(el, charWidth) * el.widthScale;
-    // ESC V rotation is done with a world transform at draw time rather than
-    // with the font's orientation, because GDI's reference point for rotated
-    // text is awkward to place precisely.
-    *deleteFont = true;
-    return CreateFont(fnHeight, fnWidth, 0, 0,
-        el.isBold ? FW_BOLD : FW_NORMAL, FALSE, el.isUnderline, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Courier New");
+// Width in pixels of one character cell, the horizontal multiplier from
+// ESC ! / GS ! included.
+static int ElementCellWidth(const PrinterElement& el, int charWidth) {
+    return ElementNaturalWidth(el, charWidth) * el.widthScale;
 }
 
 // Extra pixels inserted after each glyph, from ESC SP.
@@ -391,28 +403,28 @@ static int RotatedCellWidth(const PrinterElement& el, int fontSize, int charWidt
     return cell < 1 ? 1 : cell;
 }
 
+// Distance from one character to the next, ESC SP spacing included.
+static int ElementAdvance(const PrinterElement& el, int fontSize, int charWidth) {
+    if (el.isRotated90) return RotatedCellWidth(el, fontSize, charWidth);
+    return ElementCellWidth(el, charWidth) + ElementCharExtra(el, charWidth);
+}
+
+// Pixel width of a whole text element. Every glyph occupies the same cell, so
+// this is arithmetic rather than a question for the font engine - which is the
+// point of a dot matrix font: 48 columns are 48 cells wide, exactly.
+static int ElementTextWidth(const PrinterElement& el, int fontSize, int charWidth) {
+    return ElementAdvance(el, fontSize, charWidth) * (int)el.text.length();
+}
+
 // Total pixel width of the run of TEXT elements starting at startIdx, up to the
 // next line break (NEWLINE / CUT / BITMAP) or the end of the list. Used to
 // compute the horizontal offset for centered/right justification (ESC a).
-static int MeasureTextLineWidth(HDC hdc, const std::vector<PrinterElement>& elements, size_t startIdx, int fontSize, int charWidth, HFONT hFontNormal) {
+static int MeasureTextLineWidth(const std::vector<PrinterElement>& elements, size_t startIdx,
+                                int fontSize, int charWidth) {
     int total = 0;
     for (size_t i = startIdx; i < elements.size(); ++i) {
         if (elements[i].type != ELEMENT_TEXT) break;
-        if (elements[i].isRotated90) {
-            total += RotatedCellWidth(elements[i], fontSize, charWidth) *
-                     (int)elements[i].text.length();
-            continue;
-        }
-        bool del = false;
-        HFONT f = SelectElementFont(elements[i], fontSize, charWidth, hFontNormal, &del);
-        HGDIOBJ old = SelectObject(hdc, f);
-        SetTextCharacterExtra(hdc, ElementCharExtra(elements[i], charWidth));
-        SIZE size;
-        GetTextExtentPoint32(hdc, elements[i].text.c_str(), (int)elements[i].text.length(), &size);
-        total += size.cx;
-        SetTextCharacterExtra(hdc, 0);
-        SelectObject(hdc, old);
-        if (del) DeleteObject(f);
+        total += ElementTextWidth(elements[i], fontSize, charWidth);
     }
     return total;
 }
@@ -437,69 +449,128 @@ static bool LineHasUpsideDown(const std::vector<PrinterElement>& elements, size_
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// The dot matrix fonts
+//
+// A thermal printer has no outline font: it strikes a dot cell held in ROM,
+// 12x24 for Font A and 10x24 for Font B. Drawing from the same kind of table is
+// what keeps a character on the dot grid every ESC/POS coordinate is expressed
+// in, so 48 columns come out 48 cells wide instead of drifting by a fraction of
+// a pixel per character.
+// ---------------------------------------------------------------------------
+
+// One dot of a glyph, with ESC E / ESC G double-strike folded in: the printer
+// strikes the row a second time one dot to the right, which is what thickens
+// the stems.
+static bool GlyphDot(const FontCell& cell, const unsigned short* glyph,
+                     int x, int y, bool bold) {
+    if (!glyph || x < 0 || x >= cell.srcW || y < 0 || y >= cell.srcH) return false;
+    unsigned int row = glyph[y];
+    if (bold) row |= row >> 1;
+    return ((row >> (cell.srcW - 1 - x)) & 1) != 0;
+}
+
+// Packs a text element into a 1 bit per pixel image at its final size. A set
+// bit is paper and a clear bit is ink, so the palette can hold the ink colour
+// in entry 0 and white in entry 1 and the blit can be an AND: that leaves what
+// is already on the paper showing through, the way ink does, instead of the
+// opaque white box a plain copy would paint around every character.
+static void BuildTextBitmap(const PrinterElement& el, int fontSize, int charWidth,
+                            std::vector<unsigned char>* bits, int* outW, int* outH) {
+    *outW = 0;
+    *outH = 0;
+    int count = (int)el.text.length();
+    int advance = ElementAdvance(el, fontSize, charWidth);
+    // Turned 90 degrees, a glyph is as wide as the cell is tall and vice versa.
+    int cellW = el.isRotated90 ? ElementFontHeight(el, fontSize)
+                               : ElementCellWidth(el, charWidth);
+    int height = el.isRotated90 ? ElementCellWidth(el, charWidth)
+                                : ElementFontHeight(el, fontSize);
+    int width = advance * count;
+    if (count < 1 || width < 1 || height < 1 || cellW < 1) return;
+
+    int stride = ((width + 31) / 32) * 4; // DIB rows are DWORD aligned
+    bits->assign((size_t)stride * height, 0xFF);
+
+    FontCell cell = FontCellFor(el.font);
+    // ESC - underlines the whole cell, so the rule goes on the bottom dot row
+    // rather than immediately under the glyph: descenders reach row 22.
+    const int underlineRow = cell.srcH - 1;
+
+    for (int i = 0; i < count; ++i) {
+        const unsigned short* glyph = cell.glyph(el.text[i]);
+        int originX = i * advance;
+        for (int dy = 0; dy < height; ++dy) {
+            unsigned char* row = &(*bits)[(size_t)dy * stride];
+            for (int dx = 0; dx < advance; ++dx) {
+                bool ink = false;
+                if (el.isRotated90) {
+                    // ESC V turns each glyph 90 degrees clockwise while the
+                    // line still runs left to right, so the glyph's bottom edge
+                    // ends up on the left and its left edge on top.
+                    if (dx < cellW) {
+                        int sy = cell.srcH - 1 - dx * cell.srcH / cellW;
+                        int sx = dy * cell.srcW / height;
+                        ink = (el.isUnderline && sy == underlineRow) ||
+                              GlyphDot(cell, glyph, sx, sy, el.isBold);
+                    }
+                } else {
+                    int sy = dy * cell.srcH / height;
+                    ink = el.isUnderline && sy == underlineRow;
+                    if (!ink && dx < cellW) {
+                        ink = GlyphDot(cell, glyph, dx * cell.srcW / cellW, sy, el.isBold);
+                    }
+                }
+                // GS B swaps ink and paper over the whole cell.
+                if (ink != el.isReverse) {
+                    int px = originX + dx;
+                    row[px / 8] &= (unsigned char)~(0x80 >> (px % 8));
+                }
+            }
+        }
+    }
+
+    *outW = width;
+    *outH = height;
+}
+
+// Puts a packed glyph run on the paper. StretchDIBits rather than BitBlt
+// because it goes through the world transform, which is what places and turns
+// a page in page mode.
+static void BlitTextBitmap(HDC hdc, const std::vector<unsigned char>& bits,
+                           int w, int h, int x, int y, COLORREF ink) {
+    struct {
+        BITMAPINFOHEADER bmiHeader;
+        RGBQUAD bmiColors[2];
+    } bmi = {0};
+
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 1;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    bmi.bmiColors[0] = { GetBValue(ink), GetGValue(ink), GetRValue(ink), 0 };
+    bmi.bmiColors[1] = { 255, 255, 255, 0 };
+
+    StretchDIBits(hdc, x, y, w, h, 0, 0, w, h, bits.data(),
+                  (BITMAPINFO*)&bmi, DIB_RGB_COLORS, SRCAND);
+}
+
 // Draws one text segment at (x, y) and reports the space it took up. Used both
 // for normal output and when rendering a line into an off-screen buffer.
 static void DrawTextSegment(HDC hdc, const PrinterElement& el, int x, int y,
-                            int fontSize, int charWidth, HFONT hFontNormal, SIZE* outSize) {
-    bool deleteFont = false;
-    HFONT font = SelectElementFont(el, fontSize, charWidth, hFontNormal, &deleteFont);
-    HGDIOBJ oldFont = SelectObject(hdc, font);
-    SetTextCharacterExtra(hdc, ElementCharExtra(el, charWidth));
-
-    SIZE extent;
-    GetTextExtentPoint32(hdc, el.text.c_str(), (int)el.text.length(), &extent);
-    if (el.isRotated90) {
-        // A rotated run occupies one square cell per glyph.
-        extent.cx = RotatedCellWidth(el, fontSize, charWidth) * (int)el.text.length();
-        extent.cy = ElementFontHeight(el, fontSize);
+                            int fontSize, int charWidth, SIZE* outSize) {
+    std::vector<unsigned char> bits;
+    int w = 0, h = 0;
+    BuildTextBitmap(el, fontSize, charWidth, &bits, &w, &h);
+    if (w > 0 && h > 0) {
+        BlitTextBitmap(hdc, bits, w, h, x, y,
+                       el.isRed ? RGB(255, 0, 0) : RGB(0, 0, 0));
     }
-
-    COLORREF ink = el.isRed ? RGB(255, 0, 0) : RGB(0, 0, 0);
-    if (el.isReverse) {
-        // GS B: the ink colour fills the character cells and the glyphs are
-        // knocked out in white.
-        RECT cell = { x, y, x + extent.cx, y + extent.cy };
-        HBRUSH brush = CreateSolidBrush(ink);
-        FillRect(hdc, &cell, brush);
-        DeleteObject(brush);
-        SetTextColor(hdc, RGB(255, 255, 255));
-    } else {
-        SetTextColor(hdc, ink);
-    }
-
-    if (el.isRotated90) {
-        // ESC V: each glyph is turned 90 degrees clockwise but the line still
-        // runs left to right, so each one gets its own transform and cell.
-        // The matrix maps logical +x to device +y and logical +y to device -x.
-        int cell = RotatedCellWidth(el, fontSize, charWidth);
-        int glyphHeight = ElementFontHeight(el, fontSize);
-        SetTextCharacterExtra(hdc, 0);
-        XFORM saved;
-        GetWorldTransform(hdc, &saved);
-        for (size_t i = 0; i < el.text.length(); ++i) {
-            XFORM xf;
-            xf.eM11 = 0.0f;  xf.eM12 = 1.0f;
-            xf.eM21 = -1.0f; xf.eM22 = 0.0f;
-            xf.eDx = (FLOAT)(x + (int)i * cell + glyphHeight);
-            xf.eDy = (FLOAT)y;
-            // Compose rather than replace: in page mode the caller has already
-            // set a transform that maps the page onto the paper.
-            XFORM composed;
-            CombineTransform(&composed, &xf, &saved);
-            SetWorldTransform(hdc, &composed);
-            TextOut(hdc, 0, 0, &el.text[i], 1);
-        }
-        SetWorldTransform(hdc, &saved);
-    } else {
-        TextOut(hdc, x, y, el.text.c_str(), (int)el.text.length());
-    }
-
-    SetTextCharacterExtra(hdc, 0);
-    SelectObject(hdc, oldFont);
-    if (deleteFont) DeleteObject(font);
 
     if (outSize) {
-        outSize->cx = extent.cx;
+        outSize->cx = ElementTextWidth(el, fontSize, charWidth);
         outSize->cy = ElementFontHeight(el, fontSize);
     }
 }
@@ -514,17 +585,6 @@ static void DrawTextSegment(HDC hdc, const PrinterElement& el, int x, int y,
 // world transform does for all four directions at once - including the glyph
 // rotation the printer applies to directions 1 to 3.
 // ---------------------------------------------------------------------------
-
-// GDI realizes a font at the moment it is selected into the DC, transform
-// included, and selecting the font that is already current is a no-op. So a
-// world transform set (or restored) after the selection leaves the glyphs
-// turned the way the previous transform had them - text printed after a page
-// in direction 1 to 3 would come out rotated. Toggling through a stock font
-// forces the font to be realized again under the transform now in force.
-static void RefreshDCFont(HDC hdc, HFONT font) {
-    SelectObject(hdc, GetStockObject(SYSTEM_FONT));
-    SelectObject(hdc, font);
-}
 
 // Maps page-local pixels (x along the text flow, y across the lines) onto the
 // device, given the print area box (px, py, pw, ph) in device pixels.
@@ -553,44 +613,29 @@ static XFORM PageTransform(int dir, int px, int py, int pw, int ph) {
 
 // Pixel size of a text or bitmap element. Bitmaps are scaled like every other
 // page coordinate so that a dot keeps the same size everywhere on the page.
-static void MeasureElementBox(HDC hdc, const PrinterElement& el, int fontSize,
-                              int charWidth, HFONT hFontNormal, int* outW, int* outH) {
+static void MeasureElementBox(const PrinterElement& el, int fontSize,
+                              int charWidth, int* outW, int* outH) {
     if (el.type == ELEMENT_BITMAP) {
         *outW = DotsToPixels(el.width, charWidth);
         *outH = DotsToPixels(el.height, charWidth);
         return;
     }
-    if (el.isRotated90) {
-        *outW = RotatedCellWidth(el, fontSize, charWidth) * (int)el.text.length();
-        *outH = ElementFontHeight(el, fontSize);
-        return;
-    }
-    bool del = false;
-    HFONT f = SelectElementFont(el, fontSize, charWidth, hFontNormal, &del);
-    HGDIOBJ old = SelectObject(hdc, f);
-    SetTextCharacterExtra(hdc, ElementCharExtra(el, charWidth));
-    SIZE size;
-    GetTextExtentPoint32(hdc, el.text.c_str(), (int)el.text.length(), &size);
-    SetTextCharacterExtra(hdc, 0);
-    SelectObject(hdc, old);
-    if (del) DeleteObject(f);
-    *outW = size.cx;
+    *outW = ElementTextWidth(el, fontSize, charWidth);
     *outH = ElementFontHeight(el, fontSize);
 }
 
 // How much of the paper the page needs, in pixels, when ESC W did not state a
 // height. Directions 1 and 3 print along the paper's vertical axis, so there it
 // is the text flow that decides how far down the page reaches.
-static int MeasurePageContentHeight(HDC hdc, const std::vector<PrinterElement>& elements,
-                                    size_t startIdx, int fontSize, int charWidth,
-                                    HFONT hFontNormal) {
+static int MeasurePageContentHeight(const std::vector<PrinterElement>& elements,
+                                    size_t startIdx, int fontSize, int charWidth) {
     int needed = 0;
     for (size_t i = startIdx; i < elements.size(); ++i) {
         const PrinterElement& el = elements[i];
         if (el.type == ELEMENT_PAGE_END) break;
         if (el.type != ELEMENT_TEXT && el.type != ELEMENT_BITMAP) continue;
         int w = 0, h = 0;
-        MeasureElementBox(hdc, el, fontSize, charWidth, hFontNormal, &w, &h);
+        MeasureElementBox(el, fontSize, charWidth, &w, &h);
         int extent = (el.pageDir == 1 || el.pageDir == 3)
                          ? DotsToPixels(el.pageX, charWidth) + w
                          : DotsToPixels(el.pageY, charWidth) + h;
@@ -750,7 +795,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
         case IDM_FONTE:
         {
-            INT_PTR newSize = ShowInputDialog(hwnd, L"Tamanho do texto", g_fontSize);
+            INT_PTR newSize = ShowInputDialog(hwnd, L"Tamanho do texto (24 = Font A 12x24)", g_fontSize);
             if (newSize > 0) {
                 g_fontSize = (int)newSize;
                 SaveSettings();
@@ -956,14 +1001,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         const int leftMargin = 10;
         int currentLineMaxHeight = g_fontSize + 4; // Default line height
 
-        // Create font
-        HFONT hFontNormal = CreateFont(g_fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, 
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 
+        // The paper itself is drawn from the Font A dot matrix; this font is
+        // only for the "[CUT]" marker, which is part of the viewer rather than
+        // of what the printer produced.
+        HFONT hFontNormal = CreateFont(g_fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Courier New");
-        
+
         HGDIOBJ oldFont = SelectObject(hdc, hFontNormal);
         SetBkMode(hdc, TRANSPARENT);
-        
+        SetStretchBltMode(hdc, COLORONCOLOR);
+
         // Create Pen for cut lines
         HPEN hPenCut = CreatePen(PS_DASH, 1, RGB(100, 100, 100));
         HGDIOBJ oldPen = SelectObject(hdc, hPenCut);
@@ -971,9 +1019,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // Reference width for justification (ESC a). When the user has set a
         // fixed column count ("Colunas"), center/right within that paper width
         // (columns * character width); otherwise fall back to the window width.
-        TEXTMETRIC tm;
-        GetTextMetrics(hdc, &tm); // hFontNormal is selected here
-        int charWidth = tm.tmAveCharWidth;
+        int charWidth = CellWidthForSize(g_fontSize);
         int paperWidth = (g_colunas > 0) ? g_colunas * charWidth : 0;
 
         // ESC V needs escapement and orientation to differ, which GDI only
@@ -1036,8 +1082,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 if (pageHPx <= 0) {
                     // ESC W never ran, so there is no stated page height: take
                     // only as much paper as the content needs.
-                    pageHPx = MeasurePageContentHeight(hdc, elements, idx + 1,
-                                                       g_fontSize, charWidth, hFontNormal);
+                    pageHPx = MeasurePageContentHeight(elements, idx + 1,
+                                                       g_fontSize, charWidth);
                 }
                 if (pageWPx < 1) pageWPx = 1;
                 if (pageHPx < 1) pageHPx = 1;
@@ -1053,7 +1099,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 if (pageSavedDC) {
                     RestoreDC(hdc, pageSavedDC);
                     pageSavedDC = 0;
-                    RefreshDCFont(hdc, hFontNormal);
                 }
                 // The printer feeds the whole print area, whether it was filled
                 // or not, so the next line starts below the page.
@@ -1073,13 +1118,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 XFORM xf = PageTransform(el.pageDir, pageLeftPx, pageTopPx,
                                          pageWPx, pageHPx);
                 SetWorldTransform(hdc, &xf);
-                RefreshDCFont(hdc, hFontNormal);
 
                 int localX = DotsToPixels(el.pageX, charWidth);
                 int localY = DotsToPixels(el.pageY, charWidth);
                 if (el.type == ELEMENT_TEXT) {
-                    DrawTextSegment(hdc, el, localX, localY, g_fontSize, charWidth,
-                                    hFontNormal, NULL);
+                    DrawTextSegment(hdc, el, localX, localY, g_fontSize, charWidth, NULL);
                 } else {
                     DrawBitmapElement(hdc, el, localX, localY,
                                       DotsToPixels(el.width, charWidth),
@@ -1087,7 +1130,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
 
                 SetWorldTransform(hdc, &saved);
-                RefreshDCFont(hdc, hFontNormal);
                 continue;
             }
 
@@ -1095,7 +1137,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 // At the first text segment of a line, offset the start position
                 // for center/right justification based on the whole line width.
                 if (atLineStart) {
-                    int lineWidth = MeasureTextLineWidth(hdc, elements, idx, g_fontSize, charWidth, hFontNormal);
+                    int lineWidth = MeasureTextLineWidth(elements, idx, g_fontSize, charWidth);
                     currentX = alignStartX(lineWidth, el);
                     atLineStart = false;
 
@@ -1112,13 +1154,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                         RECT full = { 0, 0, lineWidth, lineHeight };
                         FillRect(memDC, &full, (HBRUSH)GetStockObject(WHITE_BRUSH));
                         SetBkMode(memDC, TRANSPARENT);
+                        SetStretchBltMode(memDC, COLORONCOLOR);
 
                         int offscreenX = 0;
                         size_t j = idx;
                         for (; j < elements.size() && elements[j].type == ELEMENT_TEXT; ++j) {
                             SIZE segSize;
                             DrawTextSegment(memDC, elements[j], offscreenX, 0,
-                                            g_fontSize, charWidth, hFontNormal, &segSize);
+                                            g_fontSize, charWidth, &segSize);
                             offscreenX += segSize.cx;
                         }
 
@@ -1138,7 +1181,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
 
                 SIZE segSize;
-                DrawTextSegment(hdc, el, currentX, y, g_fontSize, charWidth, hFontNormal, &segSize);
+                DrawTextSegment(hdc, el, currentX, y, g_fontSize, charWidth, &segSize);
 
                 if (segSize.cy > currentLineMaxHeight) {
                     currentLineMaxHeight = segSize.cy;

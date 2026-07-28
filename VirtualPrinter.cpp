@@ -252,12 +252,13 @@ std::vector<PrinterElement>& VirtualPrinter::Target() {
 }
 
 int VirtualPrinter::CharWidthDots() const {
-    int base = (currentFont == FONT_B) ? 9 : (currentFont == FONT_C ? 8 : 12);
+    int base = (currentFont == FONT_B) ? 10 : (currentFont == FONT_C ? 8 : 12);
     return base * widthScaleMode + charSpacingDots;
 }
 
 int VirtualPrinter::CharHeightDots() const {
-    int base = (currentFont == FONT_B) ? 17 : (currentFont == FONT_C ? 16 : 24);
+    // Font B is narrower than Font A but stands in a cell just as tall.
+    int base = (currentFont == FONT_C) ? 16 : 24;
     return base * heightScaleMode;
 }
 
